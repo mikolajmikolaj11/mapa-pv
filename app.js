@@ -11,6 +11,7 @@ const STAT = {
   stare:    { label: 'Moje stare pinezki',    color: '#9ca3af', on: true },
   reczne:   { label: 'Dodane ręcznie',        color: '#9333ea', on: true },
   ponownie: { label: 'Odwiedzić ponownie',    color: '#f59e0b', on: true },
+  potencjal:{ label: 'Potencjał',             color: '#db2777', on: true },
   umowa:    { label: 'Umowa',                 color: '#2563eb', on: true },
   nie:      { label: 'Nie zainteresowany',    color: '#dc2626', on: false },
   usun:     { label: 'Usunięte',              color: '#374151', on: false }
@@ -72,13 +73,14 @@ function render() {
   layer.clearLayers(); const cnt = {}; for (const k in STAT) cnt[k] = 0;
   for (const p of P) {
     const c = cat(p); cnt[c] = (cnt[c] || 0) + 1; if (!STAT[c] || !STAT[c].on) continue;
-    const big = c === 'umowa' || c === 'ponownie';
+    const big = c === 'umowa' || c === 'ponownie' || c === 'potencjal';
     const m = L.circleMarker([p.lat, p.lon], { renderer: R, radius: big ? 10 : 8, color: '#fff', weight: 2, fillColor: STAT[c].color, fillOpacity: 1, bubblingMouseEvents: false });
     m.on('click', e => { L.DomEvent.stop(e); open(p); }); m.addTo(layer);
   }
   $('stats').innerHTML =
     `<span><span class="dot" style="background:${STAT.nowe_p.color}"></span>Do odwiedzenia <b>${cnt.nowe_p + cnt.nowe_m}</b></span>` +
     `<span><span class="dot" style="background:${STAT.ponownie.color}"></span>Ponownie <b>${cnt.ponownie}</b></span>` +
+    `<span><span class="dot" style="background:${STAT.potencjal.color}"></span>Potencjał <b>${cnt.potencjal}</b></span>` +
     `<span><span class="dot" style="background:${STAT.umowa.color}"></span>Umowy <b>${cnt.umowa}</b></span>`;
   $('filters').innerHTML = '<h4 style="margin-top:2px">Pokaż</h4>' + Object.entries(STAT).map(([k, v]) =>
     `<label><input type="checkbox" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
