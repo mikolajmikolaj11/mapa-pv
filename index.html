@@ -47,6 +47,14 @@
   .st[data-s=nie].on{background:#dc2626;border-color:#dc2626}
   .st[data-s=usun]{color:#dc2626}
   .st[data-s=usun].on{background:#374151;border-color:#374151;color:#fff}
+  .pvrow{display:flex;gap:8px;align-items:center;margin:2px 0 10px}
+  .pvrow span{font-size:13px;color:var(--mut);flex:0 0 auto}
+  .pvb{flex:1;border:2px solid var(--line);background:#fff;border-radius:10px;padding:9px 4px;font-size:14px;font-weight:600}
+  .pvb[data-v=jest].on{background:#16a34a;border-color:#16a34a;color:#fff}
+  .pvb[data-v=nie].on{background:#6b7280;border-color:#6b7280;color:#fff}
+  #addbtn{bottom:calc(260px + var(--bot));background:#9333ea;color:#fff;font-size:28px;line-height:1}
+  #addbtn.on{background:#111827}
+  #addhint{position:fixed;top:calc(56px + var(--top));left:50%;transform:translateX(-50%);z-index:1004;background:#9333ea;color:#fff;padding:10px 14px;border-radius:12px;font-size:14px;font-weight:600;display:none;box-shadow:0 2px 10px rgba(0,0,0,.3);text-align:center}
   .note{width:100%;margin-top:10px;border:1px solid var(--line);border-radius:10px;padding:8px;font:inherit;font-size:16px;resize:none;height:56px}
   .row{display:flex;gap:8px;align-items:center;margin-top:8px}
   .row small{color:var(--mut);flex:1}
@@ -89,11 +97,14 @@
   <label><input type="checkbox" id="addrLayer" checked> Numery domów i ulice</label>
   <h4>Dane</h4>
   <button class="act" id="importbtn">📥 Importuj pinezki z pliku</button>
+  <button class="act" id="exportbtn">📤 Eksportuj dane do douczenia modelu</button>
   <button class="act" id="reloadbtn">🔄 Odśwież dane</button>
   <button class="act" id="logoutbtn">🚪 Wyloguj</button>
   <input type="file" id="file" accept=".json,.csv" hidden>
 </div>
 
+<button class="fab" id="addbtn" title="Dodaj pominięty dom">＋</button>
+<div id="addhint">Stuknij w mapę, gdzie stoi dom z PV<br><small>(＋ ponownie = anuluj)</small></div>
 <button class="fab" id="listbtn" title="Najbliższe domy">☰</button>
 <button class="fab" id="me" title="Moja pozycja">◎</button>
 
@@ -102,6 +113,7 @@
   <h2 id="t"></h2>
   <div class="sub" id="sub"></div>
   <a class="nav" id="nav" target="_blank" rel="noopener">🧭 Nawiguj w Google Maps</a>
+  <div class="pvrow"><span>Panele:</span><button class="pvb" data-v="jest">☀️ Jest PV</button><button class="pvb" data-v="nie">🚫 Nie ma PV</button></div>
   <div class="grid">
     <button class="st" data-s="ponownie">↻ Odwiedzić ponownie</button>
     <button class="st" data-s="umowa">✓ Umowa</button>

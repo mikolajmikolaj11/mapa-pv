@@ -9,6 +9,7 @@ const STAT = {
   nowe_p:   { label: 'Nowe – pewne',          color: '#16a34a', on: true },
   nowe_m:   { label: 'Nowe – prawdopodobne',  color: '#86efac', on: true },
   stare:    { label: 'Moje stare pinezki',    color: '#9ca3af', on: true },
+  reczne:   { label: 'Dodane ręcznie',        color: '#9333ea', on: true },
   ponownie: { label: 'Odwiedzić ponownie',    color: '#f59e0b', on: true },
   umowa:    { label: 'Umowa',                 color: '#2563eb', on: true },
   nie:      { label: 'Nie zainteresowany',    color: '#dc2626', on: false },
@@ -42,7 +43,7 @@ function msg(t, ms) { const m = $('msg'); m.textContent = t; m.style.display = '
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const navUrl = p => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
 const title = p => p.adres ? p.adres + (p.miejscowosc && !p.adres.includes(p.miejscowosc) ? ', ' + p.miejscowosc : '') : 'Dom z PV (bez adresu)';
-function cat(p) { if (p.status) return p.status; if (p.zrodlo === 'stare') return 'stare'; return p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m'; }
+function cat(p) { if (p.status) return p.status; if (p.zrodlo === 'stare') return 'stare'; if (p.zrodlo === 'reczne') return 'reczne'; return p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m'; }
 function dist(a, b) { const R = 6371000, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lon - a.lon) * r;
   const x = Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(x)); }
 const fmtDist = m => m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km';
@@ -89,19 +90,43 @@ $('filters').addEventListener('change', e => {
   render();
 });
 $('menubtn').onclick = () => $('panel').classList.toggle('open');
-map.on('click', () => { $('panel').classList.remove('open'); close(); });
+let addMode = false;
+function setAdd(on) { addMode = on; $('addbtn').classList.toggle('on', on); $('addhint').style.display = on ? 'block' : 'none'; }
+$('addbtn').onclick = () => { close(); $('panel').classList.remove('open'); setAdd(!addMode); };
+async function reverseAddr(lat, lon) {
+  try {
+    const u = 'https://services.gugik.gov.pl/uug/?request=GetAddressReverse&srid=4326&radius=80&location=' + encodeURIComponent(`POINT(${lon} ${lat})`);
+    const r = await fetch(u); const d = await r.json(); const v = d.results && d.results['1']; if (!v) return null;
+    return { adres: (v.street || v.city) + ' ' + v.number, miejscowosc: v.city, gmina: (v.jednostka || '').replace(/[{}"]/g, '').split(',').pop() || null };
+  } catch (e) { return null; }
+}
+async function addPin(lat, lon) {
+  setAdd(false);
+  const p = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), adres: null, miejscowosc: null, gmina: null,
+    lat: +lat.toFixed(6), lon: +lon.toFixed(6), zrodlo: 'reczne', pewnosc: null, wynik: null, obszar: null, status: null, notatka: null, pv: 'jest',
+    zmieniono: new Date().toISOString() };
+  const a = await reverseAddr(p.lat, p.lon); if (a) Object.assign(p, a);
+  const { error } = await sb.from('pins').insert(p);
+  if (error) { msg('Nie udało się dodać pinezki: ' + error.message, 5000); return; }
+  P.push(p); byId[p.id] = p; render(); open(p); msg('Dodano dom z PV' + (p.adres ? ': ' + p.adres : ''));
+}
+map.on('click', e => {
+  if (addMode) { addPin(e.latlng.lat, e.latlng.lng); return; }
+  $('panel').classList.remove('open'); close();
+});
 
 // ---------- Karta pinezki ----------
 function open(p) {
   cur = p;
   $('t').textContent = title(p);
-  const src = p.zrodlo === 'stare' ? 'Twoja wcześniejsza pinezka' : ('Wykryte automatycznie' + (p.pewnosc ? ' – ' + p.pewnosc : ''));
+  const src = p.zrodlo === 'stare' ? 'Twoja wcześniejsza pinezka' : p.zrodlo === 'reczne' ? 'Dodane ręcznie' : ('Wykryte automatycznie' + (p.pewnosc ? ' – ' + p.pewnosc : ''));
   $('sub').textContent = src + (p.gmina ? ' · gm. ' + p.gmina : '') + (me ? ' · ' + fmtDist(dist(me, p)) + ' stąd' : '');
   $('nav').href = navUrl(p);
   $('gm').href = `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`;
   document.querySelectorAll('.st').forEach(b => b.classList.toggle('on', b.dataset.s === p.status));
+  document.querySelectorAll('.pvb').forEach(b => b.classList.toggle('on', b.dataset.v === p.pv));
   $('note').value = p.notatka || '';
-  $('saved').textContent = p.status || p.notatka ? 'Zmieniono: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) : '';
+  $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmieniono: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) : '';
   $('sheet').classList.add('open'); $('panel').classList.remove('open'); $('list').classList.remove('open');
 }
 function close() { $('sheet').classList.remove('open'); cur = null; }
@@ -110,10 +135,10 @@ $('close').onclick = close;
 let busy = false;
 async function save(p, patch) {
   if (busy) { msg('Chwila, zapisuję…'); return false; }
-  busy = true; const prev = { status: p.status, notatka: p.notatka, zmieniono: p.zmieniono };
+  busy = true; const prev = { status: p.status, notatka: p.notatka, pv: p.pv, zmieniono: p.zmieniono };
   Object.assign(p, patch, { zmieniono: new Date().toISOString() }); render(); if (cur === p) open(p);
   try {
-    const { error } = await sb.from('pins').update({ status: p.status, notatka: p.notatka, zmieniono: p.zmieniono }).eq('id', p.id);
+    const { error } = await sb.from('pins').update({ status: p.status, notatka: p.notatka, pv: p.pv || null, zmieniono: p.zmieniono }).eq('id', p.id);
     if (error) throw error; return true;
   } catch (e) {
     Object.assign(p, prev); render(); if (cur === p) open(p);
@@ -122,9 +147,15 @@ async function save(p, patch) {
 }
 document.querySelectorAll('.st').forEach(b => b.onclick = async () => {
   if (!cur) return; const p = cur; const s = p.status === b.dataset.s ? null : b.dataset.s;
-  if (!(await save(p, { status: s, notatka: $('note').value.trim() || null }))) return;
+  const patch = { status: s, notatka: $('note').value.trim() || null };
+  if (s === 'umowa' && !p.pv) patch.pv = 'jest';
+  if (!(await save(p, patch))) return;
   if (s === 'usun') { close(); msg('Pinezka usunięta. Przywrócisz ją w Menu → Usunięte.', 3500); }
   else msg(s ? 'Zapisano: ' + STAT[s].label : 'Status wyczyszczony');
+});
+document.querySelectorAll('.pvb').forEach(b => b.onclick = async () => {
+  if (!cur) return; const p = cur; const v = p.pv === b.dataset.v ? null : b.dataset.v;
+  if (await save(p, { pv: v })) msg(v === 'jest' ? 'Zapisano: jest PV' : v === 'nie' ? 'Zapisano: nie ma PV' : 'Wyczyszczono informację o PV');
 });
 $('note').addEventListener('change', async () => {
   if (!cur) return; const n = $('note').value.trim() || null; if ((cur.notatka || null) === n) return;
@@ -205,6 +236,14 @@ $('file').onchange = async e => {
 };
 
 // ---------- Logowanie ----------
+$('exportbtn').onclick = () => {
+  const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne').map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
+    wynik: p.wynik, obszar: p.obszar, status: p.status, pv: p.pv || (p.status === 'umowa' ? 'jest' : null), zmieniono: p.zmieniono }));
+  const blob = new Blob([JSON.stringify(rows)], { type: 'application/json' });
+  const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
+  a.download = 'pv_weryfikacja_' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
+  msg('Wyeksportowano ' + rows.length + ' pinezek z Twoimi ocenami. Wyślij ten plik do Claude.', 5000);
+};
 $('reloadbtn').onclick = () => { $('panel').classList.remove('open'); reload(); };
 $('logoutbtn').onclick = async () => { await sb.auth.signOut(); location.reload(); };
 $('loginform').addEventListener('submit', async e => {
