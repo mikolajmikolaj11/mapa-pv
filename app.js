@@ -237,6 +237,36 @@ $('file').onchange = async e => {
   } catch (err) { msg('Import nieudany: ' + (err.message || err), 6000); }
 };
 
+// ---------- Aktualizacja powiatu (nowa wersja modelu) ----------
+$('updbtn').onclick = () => $('updfile').click();
+$('updfile').onchange = async e => {
+  const file = e.target.files[0]; e.target.value = ''; if (!file) return;
+  try {
+    const rows = JSON.parse(await file.text()).map(normalize).filter(Boolean);
+    const areas = [...new Set(rows.map(r => r.obszar).filter(Boolean))];
+    if (!rows.length || !areas.length) { msg('Plik nie wygląda na plik powiatu.'); return; }
+    await loadAll();
+    const touched = p => !!(p.status || p.pv || p.notatka || p.zrodlo === 'reczne');
+    const inArea = P.filter(p => areas.includes(p.obszar));
+    const newIds = new Set(rows.map(r => r.id));
+    const toDelete = inArea.filter(p => !touched(p) && !newIds.has(p.id)).map(p => p.id);
+    // nie dodawaj nic obok miejsc już obsłużonych ani obok istniejących pinezek
+    const keep = P.filter(p => !toDelete.includes(p.id));
+    const near = (r, list, m) => list.some(p => dist(p, r) < m);
+    const handled = keep.filter(touched);
+    const toAdd = rows.filter(r => !byId[r.id] && !near(r, handled, 30) && !near(r, keep, 15));
+    msg(`Aktualizuję ${areas.join(', ')}: usuwam ${toDelete.length} nieruszonych, dodaję ${toAdd.length} nowych…`, 0);
+    for (let i = 0; i < toDelete.length; i += 200) {
+      const { error } = await sb.from('pins').delete().in('id', toDelete.slice(i, i + 200)); if (error) throw error;
+    }
+    for (let i = 0; i < toAdd.length; i += 500) {
+      const { error } = await sb.from('pins').upsert(toAdd.slice(i, i + 500), { onConflict: 'id', ignoreDuplicates: true }); if (error) throw error;
+    }
+    await loadAll(); $('panel').classList.remove('open');
+    msg(`Gotowe (${areas.join(', ')}): usunięto ${toDelete.length} starych nieruszonych, dodano ${toAdd.length} nowych. Twoje statusy, oceny i ukryte pinezki zostały bez zmian.`, 8000);
+  } catch (err) { msg('Aktualizacja nieudana: ' + (err.message || err), 6000); }
+};
+
 // ---------- Logowanie ----------
 $('exportbtn').onclick = () => {
   const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne').map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
