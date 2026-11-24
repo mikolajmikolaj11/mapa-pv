@@ -20,6 +20,7 @@ pewnosc text ('pewne' | 'prawdopodobne'); wynik real; obszar text (np. 'pow. kon
 ('ponownie' | 'lead' | 'spotkanie' | 'umowa' | 'nie' | 'potencjal' | 'usun' | null; constraint pins_status_check); notatka text; pv text ('jest' | 'nie' | null);
 zmieniono timestamptz; ukryta_admin boolean (pinezka „usunięta” przez administratora – ukryta tylko u niego);
 klient_imie, klient_nazwisko, klient_telefon, produkt text; termin timestamptz (dane klienta przy lead/spotkanie/umowa);
+autor_statusu uuid (kto nadał obecny status – ustawia trigger, nie da się podrobić);
 zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pins_straznik`).
 
 ## Role i tereny (od 2026-11-24, skrypty w `sql/`)
@@ -43,6 +44,16 @@ zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pi
 - Zapytania z SQL Editora (bez zalogowanego użytkownika) nie są ograniczane triggerem.
 - Konta testowe: menedzer.test@example.com, handlowiec.test@example.com (`sql/02_konta_testowe.sql`).
 - Skrypty SQL po kolei: 01_role_i_tereny, 02_konta_testowe, 03_statusy_i_granice, 04_klienci_i_ukrywanie.
+- Skrypt 05_grafik_i_sledzenie: autor_statusu, wymagany termin spotkania, tabela pozycje + funkcja pv_ostatnie_pozycje().
+- Śledzenie: `public.pozycje` (user_id, lat, lon, dokladnosc, czas). Zapisuje tylko menedżer i handlowiec (własne),
+  z otwartej aplikacji: co 5 min albo po 40 m (nie częściej niż co 45 s), kolejka przy braku internetu.
+  Widzi: siebie; menedżer – swoich handlowców; admin – wszystkich (pv_moze_zarzadzac). Admin nie jest śledzony.
+  Ograniczenie: przeglądarka nie wysyła pozycji, gdy aplikacja jest zamknięta lub telefon zablokowany.
+  Menu → Śledzenie zespołu: lista osób (ostatnia pozycja), Trasa dnia (km, godziny), Wszyscy na mapie (odświeżanie co min).
+- Menu → Grafik: spotkania (status 'spotkanie') wg dni, Nadchodzące / Minione, filtr osoby.
+- Menu → Wyniki zespołu (admin, menedżer): tabela osób z liczbą leadów / spotkań / umów wg autor_statusu;
+  stuknięcie liczby otwiera listę tej osoby. Filtr „Osoba” w Sprzedaży i Grafiku (osoba albo cały zespół menedżera).
+- Menu: sekcja „Pokaż na mapie” jest zwijana (stan zapamiętany).
 - Menu → Leady zebrane / Spotkania umówione / Umowy: listy domów wg aktualnego statusu (dane klienta, adres,
   Zadzwoń, Jedź, wyszukiwarka); spotkania sortowane po terminie.
 - Wygląd: własne ikony SVG (sprite w index.html), panele „szkło” nad mapą, dok akcji po prawej, kafelki statusów.
@@ -53,7 +64,8 @@ zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pi
   Rekord zostaje. Dawne statusy 'usun' przeniesiono na ten znacznik (skrypt 04). Aktualizacja powiatu traktuje
   ukryte pinezki jako obsłużone. Eksport wypisuje je jak dawniej ze statusem 'usun' (gdy nie mają innego statusu).
 - Wymagane dane klienta (pilnuje trigger pv_pins_straznik i formularz w aplikacji):
-  lead, spotkanie – imię, telefon (min. 9 cyfr), notatka; nazwisko i termin opcjonalne.
+  lead – imię, telefon (min. 9 cyfr), notatka; nazwisko opcjonalne.
+  spotkanie – jak lead + termin spotkania (wymagany, trafia do Grafiku).
   umowa – imię, nazwisko, sprzedany produkt; telefon i notatka opcjonalne.
 - Do douczania modelu używane są wyłącznie: pv, status 'umowa' (= jest PV) i pinezki ręczne. Eksport w menu aplikacji.
   Format eksportu bez zmian; w polu status mogą się teraz pojawić także 'lead' i 'spotkanie' (bez automatycznego pv).

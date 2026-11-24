@@ -90,6 +90,7 @@ async function loadMe() {
   $('who').innerHTML = `<div class="ava">${esc((n || '?').trim().charAt(0).toUpperCase())}</div><div><div class="n">${esc(n)}</div>` +
     (ME.imie ? `<small>${esc(ME.email || '')}</small>` : '') + `<span class="badge ${esc(ME.rola || '')}">${esc(ROLE_LBL[ME.rola] || 'Brak roli')}</span></div>`;
   $('teambtn').querySelector('span').textContent = isAdmin() ? 'Zespół i tereny' : 'Moi handlowcy i tereny';
+  updTrackInfo(); flushTrack();
   renderTiles();
 }
 async function loadTeam() {
@@ -120,18 +121,23 @@ function render() {
     const s = STAT[c], ring = c === 'reczne';   // ręcznie dodane: biały środek, fioletowa obwódka
     const m = L.circleMarker([p.lat, p.lon], { renderer: R, radius: s.big ? 10 : 8, color: ring ? s.color : '#fff', weight: ring ? 3.5 : 2,
       fillColor: ring ? '#fff' : s.color, fillOpacity: 1, bubblingMouseEvents: false });
-    m.on('click', e => { L.DomEvent.stop(e); if (tool) { toolClick(e.latlng); return; } open(p); }); m.addTo(layer);
+    m.on('click', e => { L.DomEvent.stop(e); if (editing()) { toolClick(e.latlng); return; } open(p); }); m.addTo(layer);
   }
   const todo = isAdmin() ? cnt.nowe_p + cnt.nowe_m : cnt.nowe;
   const chip = (k, label, n) => `<span class="chip"><span class="dot" style="background:${STAT[k].color}"></span>${label} <b>${n}</b></span>`;
   $('stats').innerHTML = chip(isAdmin() ? 'nowe_p' : 'nowe', 'Do odwiedzenia', todo) +
     ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal'].filter(forMe).map(k => chip(k, STAT[k].short, cnt[k])).join('');
+  const mine = Object.keys(STAT).filter(forMe);
+  $('filtsum').textContent = mine.filter(k => STAT[k].on).length + ' z ' + mine.length;
   $('filters').innerHTML = Object.entries(STAT).filter(([k]) => forMe(k)).map(([k, v]) =>
     `<label class="tog"><input type="checkbox" class="sw" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
   for (const k of DEALS) $('cnt_' + k).textContent = P.filter(p => p.status === k).length || '';
+  const today0 = new Date(); today0.setHours(0, 0, 0, 0);
+  $('cnt_grafik').textContent = P.filter(p => p.status === 'spotkanie' && p.termin && new Date(p.termin) >= today0).length || '';
   $('produkty').innerHTML = [...new Set(P.map(p => p.produkt).filter(Boolean))].sort().map(v => `<option value="${esc(v)}">`).join('');
   if ($('list').classList.contains('open')) fillList();
   if ($('deals').classList.contains('open')) fillDeals();
+  if ($('grafik').classList.contains('open')) fillGrafik();
 }
 $('filters').addEventListener('change', e => {
   const k = e.target.dataset.k; if (!k) return; STAT[k].on = e.target.checked;
@@ -139,12 +145,17 @@ $('filters').addEventListener('change', e => {
   render();
 });
 $('menubtn').onclick = () => $('panel').classList.toggle('open');
+try { $('filtgrp').open = localStorage.getItem('pv_filtopen') === '1'; } catch (e) {}
+$('filtgrp').addEventListener('toggle', () => { try { localStorage.setItem('pv_filtopen', $('filtgrp').open ? '1' : '0'); } catch (e) {} });
 
 // ---------- Tereny na mapie ----------
 // poly terenu: [[lat,lon],…] (narysowany) albo [[[lat,lon],…],…] (granica gminy/powiatu, kilka obwodów).
 const rings = poly => Array.isArray(poly[0][0]) ? poly : [poly];
 map.createPane('tereny'); map.getPane('tereny').style.zIndex = 350; map.getPane('tereny').style.pointerEvents = 'none';
 const TR = L.svg({ pane: 'tereny' });
+// trasy rysujemy NAD pinezkami (ale pod znacznikami osób), też bez przechwytywania stuknięć
+map.createPane('trasy'); map.getPane('trasy').style.zIndex = 450; map.getPane('trasy').style.pointerEvents = 'none';
+const RR = L.svg({ pane: 'trasy' });
 const terLayer = L.layerGroup().addTo(map), toolLayer = L.layerGroup().addTo(map);
 const PAL = ['#0ea5e9', '#14b8a6', '#eab308', '#8b5cf6', '#ef4444', '#22c55e', '#ec4899', '#06b6d4'];
 function tcolor(t) {
@@ -198,8 +209,10 @@ async function addPin(lat, lon) {
   if (ME) p.zmienil = ME.id;
   P.push(p); byId[p.id] = p; render(); open(p); msg('Dodano dom z PV' + (p.adres ? ': ' + p.adres : ''));
 }
+const editing = () => !!tool && (tool.mode === 'pick' || tool.mode === 'draw');
 map.on('click', e => {
-  if (tool) { toolClick(e.latlng); return; }
+  if (editing()) { toolClick(e.latlng); return; }
+  if (tool) { close(); return; }
   if (addMode) { addPin(e.latlng.lat, e.latlng.lng); return; }
   $('panel').classList.remove('open'); close();
 });
@@ -244,11 +257,14 @@ async function fetchBoundary(lat, lon, level) {
 
 let tool = null;   // { mode: 'pick' | 'draw', userId, level, found, busy, pts }
 function startTool(mode, userId) {
-  close(); closeTeam(); $('panel').classList.remove('open'); $('list').classList.remove('open'); setAdd(false);
+  closeSheets(); setAdd(false);
   tool = { mode, userId, level: 'gmina', found: null, busy: false, pts: [] };
   document.body.classList.add('tooling'); renderTool();
 }
-function endTool(back) { tool = null; toolLayer.clearLayers(); document.body.classList.remove('tooling'); if (back) openTeam(); }
+function endTool(back) {
+  const m = tool && tool.mode; tool = null; toolLayer.clearLayers(); document.body.classList.remove('tooling');
+  if (back) (m === 'trasa' || m === 'zespol') ? openTrack() : openTeam();
+}
 // podgląd terenu czytelny na zdjęciu lotniczym: biała linia z ciemną obwódką
 function hiPoly(poly, dashed) {
   L.polygon(poly, { renderer: TR, pane: 'tereny', interactive: false, color: '#172033', weight: 7, opacity: 0.55, fill: false }).addTo(toolLayer);
@@ -257,7 +273,33 @@ function hiPoly(poly, dashed) {
 function renderTool() {
   toolLayer.clearLayers(); if (!tool) return;
   const who = esc(fullName(USERS[tool.userId])); let h;
-  if (tool.mode === 'pick') {
+  if (tool.mode === 'trasa') {
+    const pts = tool.pts, u = USERS[tool.userId], col = pcolor(tool.userId);
+    let km = 0; for (let i = 1; i < pts.length; i++) km += dist(pts[i - 1], pts[i]) / 1000;
+    const tm = t => new Date(t).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+    const dl = new Date(tool.day + 'T12:00:00').toLocaleDateString('pl-PL', { weekday: 'short', day: 'numeric', month: 'long' });
+    h = `<div class="tt">Trasa: ${who}</div><div class="ts">${pts.length ? `${tm(pts[0].czas)}–${tm(pts[pts.length - 1].czas)}, około ${km.toFixed(1).replace('.', ',')} km, ${pts.length} punktów` : 'Brak pozycji tego dnia. Trasa zapisuje się tylko, gdy aplikacja jest otwarta.'}</div>
+      <div class="r"><button class="ico" data-a="prev" aria-label="Poprzedni dzień">${ic('back')}</button><button data-a="day" disabled style="opacity:1">${esc(dl)}</button><button class="ico" data-a="next" aria-label="Następny dzień" ${tool.day >= todayStr() ? 'disabled' : ''}>${ic('next')}</button><button class="pri" data-a="cancel">Zamknij</button></div>`;
+    if (pts.length) {
+      const ll = pts.map(p => [p.lat, p.lon]);
+      L.polyline(ll, { renderer: RR, pane: 'trasy', interactive: false, color: '#fff', weight: 8, opacity: 0.9 }).addTo(toolLayer);
+      L.polyline(ll, { renderer: RR, pane: 'trasy', interactive: false, color: col, weight: 4.5 }).addTo(toolLayer);
+      L.circleMarker(ll[0], { renderer: RR, pane: 'trasy', interactive: false, radius: 7, color: '#fff', weight: 3, fillColor: '#16a34a', fillOpacity: 1 }).addTo(toolLayer)
+        .bindTooltip('Start ' + tm(pts[0].czas), { permanent: true, direction: 'left', offset: [-8, 0], className: 'tlabel' });
+      L.marker(ll[ll.length - 1], { icon: tmark(u), interactive: false }).addTo(toolLayer)
+        .bindTooltip(esc(fullName(u)) + ', ' + tm(pts[pts.length - 1].czas), { permanent: true, direction: 'right', offset: [18, 0], className: 'tlabel' });
+    }
+  } else if (tool.mode === 'zespol') {
+    const ppl = trackPeople(), on = ppl.filter(u => LAST[u.id]);
+    h = `<div class="tt">Zespół na mapie</div><div class="ts">Ostatnie znane pozycje ${on.length} z ${ppl.length} osób, odświeżane co minutę. Stuknij osobę, by zobaczyć jej dzisiejszą trasę.</div>
+      <div class="r"><button class="pri" data-a="cancel">Zamknij</button></div>`;
+    for (const u of on) {
+      const l = LAST[u.id], old = Date.now() - new Date(l.czas) > 15 * 60000;
+      L.marker([l.lat, l.lon], { icon: tmark(u, old ? 'old' : ''), zIndexOffset: 2000 }).addTo(toolLayer)
+        .bindTooltip(esc(fullName(u)) + ', ' + ago(l.czas), { permanent: true, direction: 'right', offset: [18, 0], className: 'tlabel' })
+        .on('click', () => showRoute(u.id, todayStr()));
+    }
+  } else if (tool.mode === 'pick') {
     h = `<div class="tt">Teren dla: ${who}</div>
       <div class="seg" id="lvl"><button data-l="gmina" class="${tool.level === 'gmina' ? 'on' : ''}">Gmina</button><button data-l="powiat" class="${tool.level === 'powiat' ? 'on' : ''}">Powiat</button></div>` +
       (tool.found ? `<div class="found">${ic('check')}${esc(tool.found.name)}</div>`
@@ -286,6 +328,10 @@ $('tool').addEventListener('click', async e => {
   const l = e.target.closest('[data-l]'); if (l && tool) { tool.level = l.dataset.l; tool.found = null; renderTool(); return; }
   const b = e.target.closest('button[data-a]'); if (!b || !tool) return; const a = b.dataset.a;
   if (a === 'cancel') { endTool(true); return; }
+  if (a === 'prev' || a === 'next') {
+    const d = new Date(tool.day + 'T12:00:00'); d.setDate(d.getDate() + (a === 'prev' ? -1 : 1));
+    showRoute(tool.userId, d.toISOString().slice(0, 10)); return;
+  }
   if (a === 'undo') { tool.name = ($('toolname') || {}).value; tool.pts.pop(); renderTool(); return; }
   if (a === 'save') {
     const row = tool.mode === 'pick'
@@ -391,7 +437,7 @@ $('teambody').addEventListener('click', async e => {
 const DEALS = ['lead', 'spotkanie', 'umowa'];
 const FORM = {
   lead:      [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 0], ['klient_telefon', 'Telefon', 1, 'tel'], ['notatka', 'Notatka', 1, 'area']],
-  spotkanie: [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 0], ['klient_telefon', 'Telefon', 1, 'tel'], ['termin', 'Termin spotkania', 0, 'datetime-local'], ['notatka', 'Notatka', 1, 'area']],
+  spotkanie: [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 0], ['klient_telefon', 'Telefon', 1, 'tel'], ['termin', 'Termin spotkania', 1, 'datetime-local'], ['notatka', 'Notatka', 1, 'area']],
   umowa:     [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 1], ['produkt', 'Sprzedany produkt', 1, 'text', 'produkty'], ['klient_telefon', 'Telefon', 0, 'tel'], ['notatka', 'Notatka', 0, 'area']]
 };
 const CLIENT = ['klient_imie', 'klient_nazwisko', 'klient_telefon', 'produkt', 'termin'];
@@ -401,7 +447,7 @@ const fmtWhen = t => t ? new Date(t).toLocaleString('pl-PL', { weekday: 'short',
 const toLocalInput = t => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
 function fieldError(k, v, req) {
   const t = String(v || '').trim();
-  if (req && !t) return k === 'notatka' ? 'Wpisz notatkę' : k === 'produkt' ? 'Wpisz sprzedany produkt' : 'To pole jest wymagane';
+  if (req && !t) return k === 'notatka' ? 'Wpisz notatkę' : k === 'produkt' ? 'Wpisz sprzedany produkt' : k === 'termin' ? 'Wybierz dzień i godzinę spotkania' : 'To pole jest wymagane';
   if (k === 'klient_telefon' && t && digits(t).length < 9) return 'Numer telefonu musi mieć co najmniej 9 cyfr';
   return '';
 }
@@ -519,15 +565,42 @@ $('note').addEventListener('change', async () => {
   if (await save(cur, { notatka: n })) msg('Notatka zapisana');
 });
 
+// ---------- Śledzenie: wysyłanie własnej pozycji (menedżer i handlowiec, gdy aplikacja jest otwarta) ----------
+const tracked = () => !!ME && (ME.rola === 'manager' || ME.rola === 'handlowiec');
+let lastSent = null, tq = [], gpsState = 'wait';
+function trackPos(pos) {
+  if (!tracked()) return; const c = pos.coords; if (c.accuracy > 150) return;
+  const pt = { lat: +c.latitude.toFixed(6), lon: +c.longitude.toFixed(6), dokladnosc: Math.round(c.accuracy), czas: new Date(pos.timestamp || Date.now()).toISOString() };
+  const dt = lastSent ? Date.now() - lastSent.t : Infinity, dd = lastSent ? dist(lastSent, pt) : Infinity;
+  if (!(dt > 300000 || (dt > 45000 && dd > 40))) return;   // co 5 min albo po przejechaniu 40 m (nie częściej niż co 45 s)
+  lastSent = { ...pt, t: Date.now() }; tq.push(pt); flushTrack();
+}
+async function flushTrack() {
+  if (flushTrack.busy || !tq.length) return; flushTrack.busy = true;
+  const batch = tq.splice(0, 100);
+  try { const { error } = await sb.from('pozycje').insert(batch); if (error) throw error; }
+  catch (e) { tq = batch.concat(tq).slice(-500); }   // brak internetu: spróbujemy później
+  flushTrack.busy = false; updTrackInfo();
+}
+setInterval(flushTrack, 60000);
+function updTrackInfo() {
+  const el = $('trackinfo'); el.hidden = !tracked(); if (!tracked()) return;
+  el.className = 'trk ' + (gpsState === 'ok' ? 'on' : gpsState === 'off' ? 'off' : '');
+  el.textContent = gpsState === 'off' ? 'Lokalizacja wyłączona – przełożony nie widzi Twojej trasy. Włącz ją w ustawieniach przeglądarki.'
+    : gpsState === 'ok' ? 'Udostępniasz lokalizację przełożonemu, gdy aplikacja jest otwarta' + (tq.length ? ' (czeka na wysłanie: ' + tq.length + ')' : '')
+    : 'Czekam na sygnał GPS…';
+}
+
 // ---------- GPS ----------
 function startGps(center) {
   if (!navigator.geolocation) { msg('Ten telefon nie udostępnia lokalizacji.'); return; }
   if (startGps.w == null) startGps.w = navigator.geolocation.watchPosition(pos => {
     const first = !me; me = { lat: pos.coords.latitude, lon: pos.coords.longitude };
+    if (gpsState !== 'ok') { gpsState = 'ok'; updTrackInfo(); } trackPos(pos);
     if (!meMarker) meMarker = L.marker([me.lat, me.lon], { icon: L.divIcon({ className: '', html: '<div class="medot"></div>', iconSize: [18, 18] }), interactive: false, zIndexOffset: 1000 }).addTo(map);
     else meMarker.setLatLng([me.lat, me.lon]);
     if (first && startGps.center) { map.setView([me.lat, me.lon], Math.max(map.getZoom(), 11)); startGps.center = false; }
-  }, err => { if (startGps.center) msg('Brak dostępu do lokalizacji. Zezwól na nią w ustawieniach przeglądarki.', 4000); startGps.center = false; },
+  }, err => { if (err.code === 1) { gpsState = 'off'; updTrackInfo(); } if (startGps.center) msg('Brak dostępu do lokalizacji. Zezwól na nią w ustawieniach przeglądarki.', 4000); startGps.center = false; },
   { enableHighAccuracy: true, maximumAge: 10000, timeout: 20000 });
   if (center) { if (me) map.setView([me.lat, me.lon], Math.max(map.getZoom(), 12)); else startGps.center = true; }
 }
@@ -548,17 +621,156 @@ $('ul').addEventListener('click', e => {
   const p = byId[li.dataset.id]; if (!p) return; map.setView([p.lat, p.lon], Math.max(map.getZoom(), 13)); open(p);
 });
 
-// ---------- Sprzedaż: Leady zebrane, Spotkania umówione, Umowy ----------
+// ---------- Śledzenie zespołu: lista osób, trasa dnia, wszyscy na mapie ----------
+const PCOL = ['#2563eb', '#0d9488', '#7c3aed', '#ea580c', '#db2777', '#0891b2', '#65a30d', '#b45309'];
+const pcolor = id => { let h = 0; for (const c of String(id)) h = (h * 31 + c.charCodeAt(0)) | 0; return PCOL[Math.abs(h) % PCOL.length]; };
+const initial = u => (fullName(u) || '?').trim().charAt(0).toUpperCase();
+function ago(t) {
+  const m = Math.round((Date.now() - new Date(t)) / 60000);
+  return m < 1 ? 'przed chwilą' : m < 60 ? m + ' min temu' : m < 1440 ? Math.floor(m / 60) + ' godz. temu' : new Date(t).toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' });
+}
+const todayStr = () => { const d = new Date(); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 10); };
+let LAST = {};
+async function loadLast() {
+  const { data, error } = await sb.rpc('pv_ostatnie_pozycje'); if (error) throw error;
+  LAST = Object.fromEntries((data || []).map(r => [r.user_id, r]));
+}
+function trackPeople() {   // kogo wolno śledzić: menedżer – swoich handlowców; admin – menedżerów i handlowców
+  const all = Object.values(USERS);
+  if (isAdmin()) return all.filter(u => u.rola === 'manager' || u.rola === 'handlowiec');
+  return ME && ME.rola === 'manager' ? teamOf(ME.id) : [];
+}
+async function openTrack() {
+  closeSheets(); if (!$('trackday').value) $('trackday').value = todayStr();
+  $('trackbody').innerHTML = '<div class="empty">Wczytuję pozycje…</div>'; $('track').classList.add('open');
+  try { await loadTeam(); await loadLast(); } catch (e) { msg('Nie udało się pobrać pozycji: ' + (e.message || e), 5000); }
+  fillTrack();
+}
+function fillTrack() {
+  const row = (u, sub) => {
+    const l = LAST[u.id], live = l && Date.now() - new Date(l.czas) < 15 * 60000;
+    return `<div class="person${sub ? ' sub' : ''}"><div class="av" style="background:${pcolor(u.id)}">${esc(initial(u))}</div>` +
+      `<div class="pi"><b>${esc(fullName(u))}</b><small class="${live ? 'live' : ''}">${l ? (live ? 'Aktywny: ' : 'Ostatnio: ') + ago(l.czas) : 'Brak pozycji z ostatnich 7 dni'}</small></div>` +
+      (l ? `<button data-a="where" data-u="${u.id}">Gdzie</button>` : '') + `<button class="pri" data-a="route" data-u="${u.id}">Trasa</button></div>`;
+  };
+  let h = '';
+  if (isAdmin()) {
+    const all = Object.values(USERS);
+    for (const m of all.filter(u => u.rola === 'manager').sort(byName)) h += `<div class="day">Zespół: ${esc(fullName(m))}</div>` + row(m) + teamOf(m.id).map(u => row(u, 1)).join('');
+    const loose = all.filter(u => u.rola === 'handlowiec' && !u.manager_id).sort(byName);
+    if (loose.length) h += '<div class="day">Bez menedżera</div>' + loose.map(u => row(u)).join('');
+  } else h += '<div class="day">Twoi handlowcy</div>' + (teamOf(ME.id).map(u => row(u)).join('') || '<div class="hint">Nie masz jeszcze przypisanych handlowców.</div>');
+  $('trackbody').innerHTML = h || '<div class="empty">Nie ma jeszcze nikogo do śledzenia.</div>';
+}
+async function showRoute(userId, day) {
+  const from = new Date(day + 'T00:00:00'), to = new Date(from); to.setDate(to.getDate() + 1);
+  const { data, error } = await sb.from('pozycje').select('lat,lon,czas').eq('user_id', userId)
+    .gte('czas', from.toISOString()).lt('czas', to.toISOString()).order('czas').limit(5000);
+  if (error) { msg('Nie udało się pobrać trasy: ' + error.message, 5000); return; }
+  closeSheets(); setAdd(false);
+  tool = { mode: 'trasa', userId, day, pts: data || [] }; document.body.classList.add('tooling'); renderTool();
+  if (tool.pts.length) map.fitBounds(L.latLngBounds(tool.pts.map(p => [p.lat, p.lon])), { padding: [40, 40], maxZoom: 14 });
+}
+async function showTeamMap(focusId) {
+  try { await loadLast(); } catch (e) { msg('Nie udało się pobrać pozycji.', 4000); return; }
+  closeSheets(); setAdd(false);
+  if (!tool || tool.mode !== 'zespol') { tool = { mode: 'zespol' }; document.body.classList.add('tooling'); }
+  renderTool();
+  const ids = trackPeople().map(u => u.id).filter(id => LAST[id]);
+  const pts = (focusId ? [focusId] : ids).filter(id => LAST[id]).map(id => [LAST[id].lat, LAST[id].lon]);
+  if (pts.length === 1) map.setView(pts[0], Math.max(map.getZoom(), 13)); else if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [60, 60], maxZoom: 14 });
+  clearInterval(showTeamMap.t); showTeamMap.t = setInterval(async () => { if (!tool || tool.mode !== 'zespol') return clearInterval(showTeamMap.t); try { await loadLast(); renderTool(); } catch (e) {} }, 60000);
+}
+const tmark = (u, cls) => L.divIcon({ className: '', html: `<div class="tmark ${cls || ''}" style="background:${pcolor(u ? u.id : '')}">${esc(initial(u))}</div>`, iconSize: [34, 34], iconAnchor: [17, 17] });
+$('trackbtn').onclick = openTrack;
+$('trackclose').onclick = () => $('track').classList.remove('open');
+$('trackall').onclick = () => showTeamMap();
+$('trackbody').addEventListener('click', e => {
+  const b = e.target.closest('button[data-a]'); if (!b) return;
+  if (b.dataset.a === 'route') showRoute(b.dataset.u, $('trackday').value || todayStr());
+  if (b.dataset.a === 'where') showTeamMap(b.dataset.u);
+});
+
+// ---------- Kto nadał status: filtr osoby dla menedżera i administratora ----------
+// WHO: '' – wszyscy, 'u:<id>' – jedna osoba, 't:<id menedżera>' – menedżer razem z jego handlowcami.
+let WHO = '';
+const autor = p => p.autor_statusu || p.zmienil;
+const byName = (a, b) => fullName(a).localeCompare(fullName(b), 'pl');
+const teamOf = id => Object.values(USERS).filter(u => u.rola === 'handlowiec' && u.manager_id === id).sort(byName);
+function whoSet() {
+  if (!WHO) return null; const [t, id] = WHO.split(':');
+  return new Set(t === 'u' ? [id] : [id, ...teamOf(id).map(u => u.id)]);
+}
+const byWho = p => { const s = whoSet(); return !s || s.has(autor(p)); };
+function whoSelect() {
+  if (!ME || (ME.rola !== 'admin' && ME.rola !== 'manager')) return '';
+  const opt = (v, l) => `<option value="${v}" ${WHO === v ? 'selected' : ''}>${esc(l)}</option>`;
+  let o = opt('', 'Wszyscy');
+  if (isAdmin()) {
+    const all = Object.values(USERS);
+    for (const m of all.filter(u => u.rola === 'manager').sort(byName))
+      o += `<optgroup label="${esc(fullName(m))}">` + opt('t:' + m.id, 'Cały zespół: ' + fullName(m)) + opt('u:' + m.id, fullName(m) + ' (osobiście)') +
+        teamOf(m.id).map(h => opt('u:' + h.id, fullName(h))).join('') + '</optgroup>';
+    const loose = all.filter(u => u.rola === 'handlowiec' && !u.manager_id).sort(byName);
+    if (loose.length) o += '<optgroup label="Bez menedżera">' + loose.map(h => opt('u:' + h.id, fullName(h))).join('') + '</optgroup>';
+    o += '<optgroup label="Administratorzy">' + all.filter(u => u.rola === 'admin').sort(byName).map(a => opt('u:' + a.id, fullName(a))).join('') + '</optgroup>';
+  } else {
+    o += opt('u:' + ME.id, 'Ja') + teamOf(ME.id).map(h => opt('u:' + h.id, fullName(h))).join('');
+  }
+  return `<label for="whosel">Osoba</label><select id="whosel" data-who>${o}</select>`;
+}
+document.addEventListener('change', e => {
+  if (!e.target.matches('select[data-who]')) return; WHO = e.target.value;
+  if ($('deals').classList.contains('open')) fillDeals();
+  if ($('grafik').classList.contains('open')) fillGrafik();
+});
+function closeSheets() {
+  close(); closeTeam(); ['panel', 'list', 'deals', 'grafik', 'track'].forEach(id => $(id).classList.remove('open'));
+}
+
+// ---------- Sprzedaż: Wyniki zespołu, Leady zebrane, Spotkania umówione, Umowy ----------
 let dealTab = 'lead';
-const DEAL_LBL = { lead: 'Leady', spotkanie: 'Spotkania', umowa: 'Umowy' };
+const DEAL_LBL = { zespol: 'Zespół', lead: 'Leady', spotkanie: 'Spotkania', umowa: 'Umowy' };
 function openDeals(k) {
-  dealTab = k; $('dealsq').value = ''; fillDeals();
-  $('deals').classList.add('open'); close(); $('panel').classList.remove('open'); $('list').classList.remove('open'); closeTeam();
+  if (k === 'zespol' && !(ME && (ME.rola === 'admin' || ME.rola === 'manager'))) k = 'lead';
+  dealTab = k; $('dealsq').value = ''; closeSheets(); fillDeals(); $('deals').classList.add('open');
+}
+function scoreRow(id, label, cls) {
+  const n = k => P.filter(p => p.status === k && (id instanceof Set ? id.has(autor(p)) : autor(p) === id)).length;
+  const who = id instanceof Set ? cls.who : 'u:' + id;
+  return `<div class="srow ${cls.row || ''}"><button class="nm ${cls.sub ? 'sub' : ''}" data-who="${who}" data-k="lead">${esc(label)}</button>` +
+    DEALS.map(k => { const v = n(k); return `<button class="pill ${v ? '' : 'z'}" style="--c:${STAT[k].color}" data-who="${who}" data-k="${k}" aria-label="${STAT[k].label}: ${v}">${v}</button>`; }).join('') + '</div>';
+}
+const scoreHead = '<div class="srow head"><span>Osoba</span><span>Leady</span><span>Spotk.</span><span>Umowy</span></div>';
+function fillScore() {
+  let h = '';
+  const card = (m, title, sub) => {
+    const team = teamOf(m.id), ids = new Set([m.id, ...team.map(u => u.id)]);
+    return `<div class="score"><div class="sh">${esc(title)}<small>${sub}</small></div>${scoreHead}` +
+      scoreRow(ids, 'Razem', { row: 'tot', who: 't:' + m.id }) +
+      scoreRow(m.id, m.id === ME.id ? 'Ja' : 'Osobiście', {}) +
+      team.map(u => scoreRow(u.id, fullName(u), { sub: 1 })).join('') + '</div>';
+  };
+  if (isAdmin()) {
+    const all = Object.values(USERS);
+    for (const m of all.filter(u => u.rola === 'manager').sort(byName)) h += card(m, fullName(m), teamOf(m.id).length + ' handl.');
+    const loose = all.filter(u => u.rola === 'handlowiec' && !u.manager_id).sort(byName);
+    if (loose.length) h += `<div class="score"><div class="sh">Bez menedżera</div>${scoreHead}${loose.map(u => scoreRow(u.id, fullName(u), {})).join('')}</div>`;
+    h += `<div class="score"><div class="sh">Administratorzy</div>${scoreHead}${all.filter(u => u.rola === 'admin').sort(byName).map(u => scoreRow(u.id, fullName(u), {})).join('')}</div>`;
+  } else h += card(ME, 'Twój zespół', teamOf(ME.id).length + ' handl.');
+  $('dealssub').textContent = 'Kto ile zebrał. Stuknij liczbę, by zobaczyć szczegóły.';
+  $('dealsul').innerHTML = `<li style="list-style:none">${h}</li>`;
 }
 function fillDeals() {
-  const q = $('dealsq').value.trim().toLowerCase();
-  $('dealtabs').innerHTML = DEALS.map(k => `<button data-k="${k}" class="${k === dealTab ? 'on' : ''}">${DEAL_LBL[k]} <b>${P.filter(p => p.status === k).length}</b></button>`).join('');
-  let list = P.filter(p => p.status === dealTab);
+  const q = $('dealsq').value.trim().toLowerCase(), lead = ME && (ME.rola === 'admin' || ME.rola === 'manager');
+  const tabs = (lead ? ['zespol'] : []).concat(DEALS);
+  $('dealtabs').style.gridTemplateColumns = `repeat(${tabs.length},1fr)`;
+  $('dealtabs').innerHTML = tabs.map(k => `<button data-k="${k}" class="${k === dealTab ? 'on' : ''}">${DEAL_LBL[k]}` +
+    (k === 'zespol' ? '' : ` <b>${P.filter(p => p.status === k && byWho(p)).length}</b>`) + '</button>').join('');
+  $('dealswho').innerHTML = dealTab === 'zespol' ? '' : whoSelect();
+  $('dealsq').style.display = dealTab === 'zespol' ? 'none' : '';
+  if (dealTab === 'zespol') { fillScore(); return; }
+  let list = P.filter(p => p.status === dealTab && byWho(p));
   if (q) list = list.filter(p => [clientName(p), title(p), p.gmina, p.klient_telefon, p.produkt, p.notatka].join(' ').toLowerCase().includes(q));
   list.sort(dealTab === 'spotkanie'
     ? (a, b) => (a.termin ? 0 : 1) - (b.termin ? 0 : 1) || String(a.termin || '').localeCompare(String(b.termin || '')) || String(b.zmieniono).localeCompare(String(a.zmieniono))
@@ -571,15 +783,65 @@ function fillDeals() {
       `<div class="d1"><span class="dot" style="background:${c}"></span><b>${esc(clientName(p) || 'Brak danych klienta')}</b><small>${esc(new Date(p.zmieniono).toLocaleDateString('pl-PL'))}</small></div>` +
       `<div class="d2">${esc(title(p))}${p.gmina ? ', gm. ' + esc(p.gmina) : ''}</div>` +
       (info.length ? `<div class="d3">${info.map(esc).join('<br>')}</div>` : '') +
-      `<div class="d4"><small>${p.zmienil ? 'Wpisał(a): ' + esc(uname(p.zmienil)) : ''}</small>` +
+      `<div class="d4"><small>${autor(p) ? 'Wpisał(a): ' + esc(uname(autor(p))) : ''}</small>` +
       (p.klient_telefon ? `<a class="go call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : '') +
       `<a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></div></li>`;
   }).join('') || `<li class="empty">${q ? 'Nic nie pasuje do wyszukiwania.' : 'Nie ma jeszcze domów ze statusem „' + STAT[dealTab].label + '”. Pojawią się tu same, gdy ktoś nada ten status.'}</li>`;
 }
 document.querySelectorAll('[data-deals]').forEach(b => b.onclick = () => openDeals(b.dataset.deals));
 $('dealtabs').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) { dealTab = b.dataset.k; fillDeals(); } });
+$('dealsul').addEventListener('click', e => {
+  const b = e.target.closest('button[data-who]'); if (!b) return; e.stopPropagation();
+  WHO = b.dataset.who; dealTab = b.dataset.k; fillDeals(); $('dealsul').scrollTop = 0;
+}, true);
 $('dealsq').addEventListener('input', fillDeals);
 $('dealsclose').onclick = () => $('deals').classList.remove('open');
+
+// ---------- Grafik spotkań ----------
+let grafPast = false;
+const dayKey = d => d.getFullYear() + '-' + (d.getMonth() + 1) + '-' + d.getDate();
+function dayLabel(d) {
+  const t = new Date(); t.setHours(0, 0, 0, 0); const x = new Date(d); x.setHours(0, 0, 0, 0);
+  const diff = Math.round((x - t) / 864e5), long = x.toLocaleDateString('pl-PL', { weekday: 'long', day: 'numeric', month: 'long' });
+  return diff === 0 ? 'Dziś, ' + long : diff === 1 ? 'Jutro, ' + long : diff === -1 ? 'Wczoraj, ' + long : long.charAt(0).toUpperCase() + long.slice(1);
+}
+function openGrafik() { closeSheets(); fillGrafik(); $('grafik').classList.add('open'); }
+function fillGrafik() {
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const all = P.filter(p => p.status === 'spotkanie' && byWho(p));
+  const noDate = all.filter(p => !p.termin);
+  const list = all.filter(p => p.termin && (grafPast ? new Date(p.termin) < t0 : new Date(p.termin) >= t0))
+    .sort((a, b) => (grafPast ? -1 : 1) * (new Date(a.termin) - new Date(b.termin)));
+  $('grafikwho').innerHTML = whoSelect();
+  document.querySelectorAll('#grafikseg button').forEach(b => b.classList.toggle('on', (b.dataset.p === '1') === grafPast));
+  $('grafiksub').textContent = grafPast ? 'Spotkania, które już się odbyły' : 'Umówione spotkania od dziś';
+  const lead = ME && ME.rola !== 'handlowiec';
+  const slot = p => {
+    const d = p.termin ? new Date(p.termin) : null;
+    return `<li class="slot${grafPast ? ' past' : ''}" data-id="${esc(p.id)}"><div class="tm"><b>${d ? d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '–'}</b>` +
+      `<small>${d ? d.toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' }) : 'bez terminu'}</small></div><div class="bd"><b>${esc(clientName(p) || 'Klient')}</b>` +
+      `<div>${esc(title(p))}${p.gmina ? ', gm. ' + esc(p.gmina) : ''}</div>` + (p.notatka ? `<div>${esc(p.notatka)}</div>` : '') +
+      `<div class="d4"><small>${lead && autor(p) ? esc(uname(autor(p))) : ''}</small>` +
+      (p.klient_telefon ? `<a class="go call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : '') +
+      `<a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></div></div></li>`;
+  };
+  let h = '', last = '';
+  for (const p of list) {
+    const d = new Date(p.termin), k = dayKey(d);
+    if (k !== last) { last = k; h += `<li class="day${k === dayKey(new Date()) ? ' today' : ''}">${esc(dayLabel(d))}</li>`; }
+    h += slot(p);
+  }
+  if (!grafPast && noDate.length) h += '<li class="day">Bez terminu (dopisz go w karcie domu)</li>' + noDate.map(slot).join('');
+  $('grafikul').innerHTML = h || `<li class="empty">${grafPast ? 'Brak minionych spotkań.' : 'Brak umówionych spotkań. Pojawią się tu same po nadaniu statusu „Spotkanie umówione”.'}</li>`;
+}
+$('grafikbtn').onclick = openGrafik;
+$('grafikclose').onclick = () => $('grafik').classList.remove('open');
+$('grafikseg').addEventListener('click', e => { const b = e.target.closest('[data-p]'); if (b) { grafPast = b.dataset.p === '1'; fillGrafik(); } });
+$('grafikul').addEventListener('click', e => {
+  if (e.target.closest('a')) return; const li = e.target.closest('li[data-id]'); if (!li) return;
+  const p = byId[li.dataset.id]; if (!p) return;
+  $('grafik').classList.remove('open'); map.setView([p.lat, p.lon], Math.max(map.getZoom(), 14)); open(p);
+});
 $('dealsul').addEventListener('click', e => {
   if (e.target.closest('a')) return; const li = e.target.closest('li[data-id]'); if (!li) return;
   const p = byId[li.dataset.id]; if (!p) return;
