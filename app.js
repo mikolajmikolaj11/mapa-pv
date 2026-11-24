@@ -3,19 +3,36 @@
 const $ = id => document.getElementById(id);
 const cfg = window.PV_CONFIG || {};
 const sb = window.supabase.createClient(cfg.url, cfg.key, { auth: { persistSession: true, autoRefreshToken: true } });
+const ic = (n, cls) => `<svg class="ic${cls ? ' ' + cls : ''}"><use href="#i-${n}"/></svg>`;
+
+// ---------- Konto i rola (ustawiane po zalogowaniu) ----------
+// ME – profil zalogowanego (rola: admin | manager | handlowiec), USERS – widoczne konta, TER – widoczne tereny.
+// Uprawnienia pilnuje baza (RLS); tutaj tylko ukrywamy to, czego dana rola i tak nie może zrobić.
+let ME = null, USERS = {}, TER = [];
+const ROLE_LBL = { admin: 'Administrator', manager: 'Menedżer', handlowiec: 'Handlowiec' };
+const isAdmin = () => !!ME && ME.rola === 'admin';
+const uname = id => !id ? '' : ME && id === ME.id ? 'Ty' : (USERS[id] && (USERS[id].imie || USERS[id].email)) || 'inny użytkownik';
+const fullName = u => u ? (u.imie || u.email || '') : '';
 
 // ---------- Statusy i kolory ----------
+// who: 'admin' – widzi tylko administrator; 'team' – tylko menedżer i handlowiec; brak – wszyscy.
+// Zespół nie widzi rozróżnienia pewne/prawdopodobne/stare – dla nich to po prostu „Do odwiedzenia”.
 const STAT = {
-  nowe_p:   { label: 'Nowe – pewne',          color: '#16a34a', on: true },
-  nowe_m:   { label: 'Nowe – prawdopodobne',  color: '#86efac', on: true },
-  stare:    { label: 'Moje stare pinezki',    color: '#9ca3af', on: true },
+  nowe_p:   { label: 'Nowe – pewne',          color: '#16a34a', on: true,  who: 'admin' },
+  nowe_m:   { label: 'Nowe – prawdopodobne',  color: '#86efac', on: true,  who: 'admin' },
+  stare:    { label: 'Moje stare pinezki',    color: '#9ca3af', on: true,  who: 'admin' },
+  nowe:     { label: 'Do odwiedzenia',        color: '#16a34a', on: true,  who: 'team' },
   reczne:   { label: 'Dodane ręcznie',        color: '#9333ea', on: true },
-  ponownie: { label: 'Odwiedzić ponownie',    color: '#f59e0b', on: true },
-  potencjal:{ label: 'Potencjał',             color: '#db2777', on: true },
-  umowa:    { label: 'Umowa',                 color: '#2563eb', on: true },
-  nie:      { label: 'Nie zainteresowany',    color: '#dc2626', on: false },
-  usun:     { label: 'Usunięte',              color: '#374151', on: false }
+  ponownie: { label: 'Odwiedzić ponownie',    short: 'Ponownie',  color: '#f59e0b', on: true, icon: 'again', big: true },
+  lead:     { label: 'Lead zebrany',          short: 'Leady',     color: '#0d9488', on: true, icon: 'lead',  big: true },
+  spotkanie:{ label: 'Spotkanie umówione',    short: 'Spotkania', color: '#7c3aed', on: true, icon: 'meet',  big: true },
+  umowa:    { label: 'Umowa',                 short: 'Umowy',     color: '#2563eb', on: true, icon: 'deal',  big: true },
+  potencjal:{ label: 'Potencjał',             short: 'Potencjał', color: '#db2777', on: true, icon: 'star',  big: true, who: 'admin' },
+  nie:      { label: 'Nie zainteresowany',    color: '#dc2626', on: false, icon: 'no' },
+  usun:     { label: 'Usunięte',              color: '#374151', on: false, who: 'admin' }
 };
+const forMe = k => !STAT[k].who || (STAT[k].who === 'admin') === isAdmin();
+const TILES = ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal', 'nie'];   // kolejność na karcie domu
 try { const f = JSON.parse(localStorage.getItem('pv_filters') || 'null'); if (f) for (const k in f) if (STAT[k]) STAT[k].on = f[k]; } catch (e) {}
 
 // ---------- Mapa: ortofotomapa Geoportalu na żywo (układ PUWG 1992) ----------
@@ -27,10 +44,10 @@ const crs = new L.Proj.CRS('EPSG:2180',
 let view = { c: [51.75, 19.45], z: 4 };
 try { const v = JSON.parse(localStorage.getItem('pv_view') || 'null'); if (v) view = v; } catch (e) {}
 const map = L.map('map', { crs, zoomControl: false, minZoom: 2, maxZoom: 15, preferCanvas: true }).setView(view.c, view.z);
-L.control.zoom({ position: 'bottomright' }).addTo(map);
+L.control.zoom({ position: 'bottomleft' }).addTo(map);
 const ORTO = 'https://mapy.geoportal.gov.pl/wss/service/PZGIK/ORTO/WMTS/StandardResolution?SERVICE=WMTS&REQUEST=GetTile&VERSION=1.0.0&LAYER=ORTOFOTOMAPA&STYLE=default&FORMAT=image/jpeg&TILEMATRIXSET=EPSG:2180';
 const Orto = L.TileLayer.extend({ getTileUrl: c => `${ORTO}&TILEMATRIX=EPSG:2180:${c.z + 2}&TILEROW=${c.y}&TILECOL=${c.x}` });
-new Orto('', { tileSize: 512, maxNativeZoom: 14, maxZoom: 15, attribution: 'Ortofotomapa, adresy © GUGiK' }).addTo(map);
+new Orto('', { tileSize: 512, maxNativeZoom: 14, maxZoom: 15, attribution: 'Ortofotomapa, adresy, granice © GUGiK' }).addTo(map);
 const addr = L.tileLayer.wms('https://mapy.geoportal.gov.pl/wss/ext/KrajowaIntegracjaNumeracjiAdresowej', {
   layers: 'A08_Ulice_Linie,A07_Punkty_adresowe', format: 'image/png', transparent: true, version: '1.1.1',
   tileSize: 512, minZoom: 11, maxZoom: 15, zIndex: 5 });
@@ -44,7 +61,13 @@ function msg(t, ms) { const m = $('msg'); m.textContent = t; m.style.display = '
 const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const navUrl = p => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
 const title = p => p.adres ? p.adres + (p.miejscowosc && !p.adres.includes(p.miejscowosc) ? ', ' + p.miejscowosc : '') : 'Dom z PV (bez adresu)';
-function cat(p) { if (p.status) return p.status; if (p.zrodlo === 'stare') return 'stare'; if (p.zrodlo === 'reczne') return 'reczne'; return p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m'; }
+function cat(p) {
+  if (p.status) return p.status;
+  if (p.zrodlo === 'reczne') return 'reczne';
+  if (!isAdmin()) return 'nowe';
+  if (p.zrodlo === 'stare') return 'stare';
+  return p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m';
+}
 function dist(a, b) { const R = 6371000, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lon - a.lon) * r;
   const x = Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(x)); }
 const fmtDist = m => m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + ' km';
@@ -53,15 +76,6 @@ const fmtDist = m => m < 1000 ? Math.round(m) + ' m' : (m / 1000).toFixed(1) + '
 let P = [], byId = {}, cur = null, me = null, meMarker = null;
 const R = L.canvas({ tolerance: 10 });
 const layer = L.layerGroup().addTo(map);
-
-// ---------- Konto, rola, zespół, tereny ----------
-// ME – profil zalogowanego (rola: admin | manager | handlowiec), USERS – widoczne konta, TER – widoczne tereny.
-// Uprawnienia pilnuje baza (RLS); tutaj tylko ukrywamy to, czego dana rola i tak nie może zrobić.
-let ME = null, USERS = {}, TER = [];
-const ROLE_LBL = { admin: 'Administrator', manager: 'Menedżer', handlowiec: 'Handlowiec' };
-const isAdmin = () => !!ME && ME.rola === 'admin';
-const uname = id => !id ? '' : ME && id === ME.id ? 'Ty' : (USERS[id] && (USERS[id].imie || USERS[id].email)) || 'inny użytkownik';
-const fullName = u => u ? (u.imie || u.email || '') : '';
 
 async function loadMe() {
   const { data: s } = await sb.auth.getSession(); const user = s && s.session && s.session.user;
@@ -72,48 +86,18 @@ async function loadMe() {
   document.body.classList.remove('role-admin', 'role-manager', 'role-handlowiec');
   if (ME.rola) document.body.classList.add('role-' + ME.rola);
   if (!isAdmin()) STAT.usun.on = false;
-  $('who').innerHTML = `${esc(fullName(ME))}<span class="badge ${esc(ME.rola || '')}">${esc(ROLE_LBL[ME.rola] || 'brak roli')}</span>` +
-    (ME.imie ? `<small>${esc(ME.email || '')}</small>` : '');
-  $('teambtn').textContent = isAdmin() ? '👥 Zespół i tereny' : '👥 Moi handlowcy i tereny';
+  const n = fullName(ME);
+  $('who').innerHTML = `<div class="ava">${esc((n || '?').trim().charAt(0).toUpperCase())}</div><div><div class="n">${esc(n)}</div>` +
+    (ME.imie ? `<small>${esc(ME.email || '')}</small>` : '') + `<span class="badge ${esc(ME.rola || '')}">${esc(ROLE_LBL[ME.rola] || 'Brak roli')}</span></div>`;
+  $('teambtn').querySelector('span').textContent = isAdmin() ? 'Zespół i tereny' : 'Moi handlowcy i tereny';
+  renderTiles();
 }
 async function loadTeam() {
-  const [u, t] = await Promise.all([sb.from('profiles').select('*'), sb.from('tereny').select('*').order('id')]);
+  const [u, t] = await Promise.all([sb.from('profiles').select('*'), sb.from('tereny').select('id,user_id,nazwa,poly,teryt').order('id')]);
   if (u.error) throw u.error; if (t.error) throw t.error;
   USERS = Object.fromEntries(u.data.map(x => [x.id, x])); TER = t.data;
   renderTer(); if ($('team').classList.contains('open')) fillTeam();
 }
-
-// Tereny rysujemy pod pinezkami, w osobnej warstwie, która nie przechwytuje stuknięć.
-map.createPane('tereny'); map.getPane('tereny').style.zIndex = 350; map.getPane('tereny').style.pointerEvents = 'none';
-const TR = L.svg({ pane: 'tereny' });
-const terLayer = L.layerGroup().addTo(map), drawLayer = L.layerGroup().addTo(map);
-const PAL = ['#0ea5e9', '#14b8a6', '#eab308', '#8b5cf6', '#ef4444', '#22c55e', '#ec4899', '#06b6d4'];
-function tcolor(t) {
-  const u = USERS[t.user_id]; if (u && u.rola === 'manager') return '#f97316';
-  let h = 0; for (const c of String(t.user_id)) h = (h * 31 + c.charCodeAt(0)) | 0; return PAL[Math.abs(h) % PAL.length];
-}
-try { $('terLayer').checked = localStorage.getItem('pv_ter') !== '0'; } catch (e) {}
-$('terLayer').onchange = e => { try { localStorage.setItem('pv_ter', e.target.checked ? '1' : '0'); } catch (_) {} renderTer(); };
-function renderTer() {
-  terLayer.clearLayers(); if (!$('terLayer').checked) return;
-  for (const t of TER) {
-    const mgr = USERS[t.user_id] && USERS[t.user_id].rola === 'manager', col = tcolor(t);
-    const pg = L.polygon(t.poly, { renderer: TR, pane: 'tereny', interactive: false, color: col, weight: mgr ? 4 : 3, dashArray: mgr ? '10 7' : null,
-      fillColor: col, fillOpacity: mgr ? 0.04 : 0.1 }).addTo(terLayer);
-    // etykieta: teren handlowca w środku, teren menedżera przy górnej krawędzi (żeby się nie nakładały)
-    const b = pg.getBounds(), at = mgr ? [b.getNorth(), (b.getWest() + b.getEast()) / 2] : b.getCenter();
-    L.tooltip({ permanent: true, direction: mgr ? 'top' : 'center', className: 'tlabel', interactive: false })
-      .setLatLng(at).setContent(esc(uname(t.user_id) + (t.nazwa ? ' · ' + t.nazwa : ''))).addTo(terLayer);
-  }
-}
-function fitTer(list) {
-  const pts = list.flatMap(t => t.poly); if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [30, 30] });
-}
-$('myterbtn').onclick = () => {
-  $('panel').classList.remove('open'); const mine = TER.filter(t => ME && t.user_id === ME.id);
-  if (mine.length) fitTer(mine); else msg('Nie masz jeszcze przydzielonego terenu.', 3500);
-};
-
 async function loadAll() {
   let all = [], from = 0;
   for (;;) {
@@ -133,17 +117,17 @@ function render() {
   layer.clearLayers(); const cnt = {}; for (const k in STAT) cnt[k] = 0;
   for (const p of P) {
     const c = cat(p); cnt[c] = (cnt[c] || 0) + 1; if (!STAT[c] || !STAT[c].on) continue;
-    const big = c === 'umowa' || c === 'ponownie' || c === 'potencjal';
-    const m = L.circleMarker([p.lat, p.lon], { renderer: R, radius: big ? 10 : 8, color: '#fff', weight: 2, fillColor: STAT[c].color, fillOpacity: 1, bubblingMouseEvents: false });
-    m.on('click', e => { L.DomEvent.stop(e); if (draw) { addVertex(e.latlng); return; } open(p); }); m.addTo(layer);
+    const s = STAT[c], ring = c === 'reczne';   // ręcznie dodane: biały środek, fioletowa obwódka
+    const m = L.circleMarker([p.lat, p.lon], { renderer: R, radius: s.big ? 10 : 8, color: ring ? s.color : '#fff', weight: ring ? 3.5 : 2,
+      fillColor: ring ? '#fff' : s.color, fillOpacity: 1, bubblingMouseEvents: false });
+    m.on('click', e => { L.DomEvent.stop(e); if (tool) { toolClick(e.latlng); return; } open(p); }); m.addTo(layer);
   }
-  $('stats').innerHTML =
-    `<span><span class="dot" style="background:${STAT.nowe_p.color}"></span>Do odwiedzenia <b>${cnt.nowe_p + cnt.nowe_m}</b></span>` +
-    `<span><span class="dot" style="background:${STAT.ponownie.color}"></span>Ponownie <b>${cnt.ponownie}</b></span>` +
-    `<span><span class="dot" style="background:${STAT.potencjal.color}"></span>Potencjał <b>${cnt.potencjal}</b></span>` +
-    `<span><span class="dot" style="background:${STAT.umowa.color}"></span>Umowy <b>${cnt.umowa}</b></span>`;
-  $('filters').innerHTML = '<h4 style="margin-top:6px">Pokaż</h4>' + Object.entries(STAT).filter(([k]) => k !== 'usun' || isAdmin()).map(([k, v]) =>
-    `<label><input type="checkbox" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
+  const todo = isAdmin() ? cnt.nowe_p + cnt.nowe_m : cnt.nowe;
+  const chip = (k, label, n) => `<span class="chip"><span class="dot" style="background:${STAT[k].color}"></span>${label} <b>${n}</b></span>`;
+  $('stats').innerHTML = chip(isAdmin() ? 'nowe_p' : 'nowe', 'Do odwiedzenia', todo) +
+    ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal'].filter(forMe).map(k => chip(k, STAT[k].short, cnt[k])).join('');
+  $('filters').innerHTML = Object.entries(STAT).filter(([k]) => forMe(k)).map(([k, v]) =>
+    `<label class="tog"><input type="checkbox" class="sw" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
   if ($('list').classList.contains('open')) fillList();
 }
 $('filters').addEventListener('change', e => {
@@ -152,9 +136,44 @@ $('filters').addEventListener('change', e => {
   render();
 });
 $('menubtn').onclick = () => $('panel').classList.toggle('open');
+
+// ---------- Tereny na mapie ----------
+// poly terenu: [[lat,lon],…] (narysowany) albo [[[lat,lon],…],…] (granica gminy/powiatu, kilka obwodów).
+const rings = poly => Array.isArray(poly[0][0]) ? poly : [poly];
+map.createPane('tereny'); map.getPane('tereny').style.zIndex = 350; map.getPane('tereny').style.pointerEvents = 'none';
+const TR = L.svg({ pane: 'tereny' });
+const terLayer = L.layerGroup().addTo(map), toolLayer = L.layerGroup().addTo(map);
+const PAL = ['#0ea5e9', '#14b8a6', '#eab308', '#8b5cf6', '#ef4444', '#22c55e', '#ec4899', '#06b6d4'];
+function tcolor(t) {
+  const u = USERS[t.user_id]; if (u && u.rola === 'manager') return '#f97316';
+  let h = 0; for (const c of String(t.user_id)) h = (h * 31 + c.charCodeAt(0)) | 0; return PAL[Math.abs(h) % PAL.length];
+}
+try { $('terLayer').checked = localStorage.getItem('pv_ter') !== '0'; } catch (e) {}
+$('terLayer').onchange = e => { try { localStorage.setItem('pv_ter', e.target.checked ? '1' : '0'); } catch (_) {} renderTer(); };
+function renderTer() {
+  terLayer.clearLayers(); if (!$('terLayer').checked) return;
+  for (const t of TER) {
+    const mgr = USERS[t.user_id] && USERS[t.user_id].rola === 'manager', col = tcolor(t);
+    const pg = L.polygon(rings(t.poly), { renderer: TR, pane: 'tereny', interactive: false, color: col, weight: mgr ? 4 : 3, dashArray: mgr ? '10 7' : null,
+      fillColor: col, fillOpacity: mgr ? 0.04 : 0.1 }).addTo(terLayer);
+    // etykieta: teren handlowca w środku, teren menedżera przy górnej krawędzi (żeby się nie nakładały)
+    const b = pg.getBounds(), at = mgr ? [b.getNorth(), (b.getWest() + b.getEast()) / 2] : b.getCenter();
+    L.tooltip({ permanent: true, direction: mgr ? 'top' : 'center', className: 'tlabel', interactive: false })
+      .setLatLng(at).setContent(esc(uname(t.user_id) + (t.nazwa ? ': ' + t.nazwa : ''))).addTo(terLayer);
+  }
+}
+function fitTer(list) {
+  const pts = list.flatMap(t => rings(t.poly).flat()); if (pts.length) map.fitBounds(L.latLngBounds(pts), { padding: [30, 30] });
+}
+$('myterbtn').onclick = () => {
+  $('panel').classList.remove('open'); const mine = TER.filter(t => ME && t.user_id === ME.id);
+  if (mine.length) fitTer(mine); else msg('Nie masz jeszcze przydzielonego terenu.', 3500);
+};
+
+// ---------- Dodawanie pominiętego domu ----------
 let addMode = false;
 function setAdd(on) { addMode = on; $('addbtn').classList.toggle('on', on); $('addhint').style.display = on ? 'block' : 'none'; }
-$('addbtn').onclick = () => { if (draw) return; close(); $('panel').classList.remove('open'); setAdd(!addMode); };
+$('addbtn').onclick = () => { if (tool) return; close(); $('panel').classList.remove('open'); setAdd(!addMode); };
 async function reverseAddr(lat, lon) {
   try {
     const u = 'https://services.gugik.gov.pl/uug/?request=GetAddressReverse&srid=4326&radius=80&location=' + encodeURIComponent(`POINT(${lon} ${lat})`);
@@ -177,36 +196,106 @@ async function addPin(lat, lon) {
   P.push(p); byId[p.id] = p; render(); open(p); msg('Dodano dom z PV' + (p.adres ? ': ' + p.adres : ''));
 }
 map.on('click', e => {
-  if (draw) { addVertex(e.latlng); return; }
+  if (tool) { toolClick(e.latlng); return; }
   if (addMode) { addPin(e.latlng.lat, e.latlng.lng); return; }
   $('panel').classList.remove('open'); close();
 });
 
-// ---------- Rysowanie terenu (admin → menedżer, menedżer → jego handlowiec) ----------
-let draw = null;
-function startDraw(userId) {
+// ---------- Przydział terenu: granica gminy/powiatu z GUGiK albo rysowanie ----------
+// Granice pobiera usługa ULDK (GUGiK). Upraszczamy je do ok. 10 m, żeby baza liczyła szybko.
+function simplify(pts, tol) {
+  if (pts.length < 4) return pts;
+  const k = Math.cos(pts[0][0] * Math.PI / 180), keep = new Uint8Array(pts.length); keep[0] = keep[pts.length - 1] = 1;
+  const stack = [[0, pts.length - 1]];
+  while (stack.length) {
+    const [a, b] = stack.pop(); let md = 0, mi = -1;
+    const ax = pts[a][1] * k, ay = pts[a][0], bx = pts[b][1] * k, by = pts[b][0], dx = bx - ax, dy = by - ay, L2 = dx * dx + dy * dy;
+    for (let i = a + 1; i < b; i++) {
+      const px = pts[i][1] * k, py = pts[i][0];
+      let t = L2 ? ((px - ax) * dx + (py - ay) * dy) / L2 : 0; t = Math.max(0, Math.min(1, t));
+      const d = Math.hypot(px - ax - t * dx, py - ay - t * dy); if (d > md) { md = d; mi = i; }
+    }
+    if (md > tol) { keep[mi] = 1; stack.push([a, mi], [mi, b]); }
+  }
+  return pts.filter((_, i) => keep[i]);
+}
+function parseWkt(w) {
+  const out = []; const re = /\(([^()]+)\)/g; let m;
+  while ((m = re.exec(w))) {
+    let pts = m[1].split(',').map(s => { const [x, y] = s.trim().split(/\s+/).map(Number); return [y, x]; });
+    if (pts.length > 1 && pts[0][0] === pts[pts.length - 1][0] && pts[0][1] === pts[pts.length - 1][1]) pts.pop();
+    pts = simplify(pts, 0.0001).map(([a, b]) => [+a.toFixed(6), +b.toFixed(6)]);
+    if (pts.length >= 3) out.push(pts);
+  }
+  return out;
+}
+async function fetchBoundary(lat, lon, level) {
+  const req = level === 'powiat' ? 'GetCountyByXY' : 'GetCommuneByXY';
+  const r = await fetch(`https://uldk.gugik.gov.pl/?request=${req}&xy=${lon},${lat},4326&result=teryt,commune,county,geom_wkt&srid=4326`);
+  const lines = (await r.text()).split('\n').map(s => s.trim()); const i = lines.indexOf('0');
+  if (i < 0 || !lines[i + 1]) throw new Error('W tym miejscu nie znaleziono granicy.');
+  const f = lines[i + 1].split('|'), poly = parseWkt(f[3] || '');
+  if (!poly.length) throw new Error('Nie udało się odczytać granicy.');
+  return { teryt: f[0], name: level === 'powiat' ? f[2] : 'gm. ' + f[1], poly };
+}
+
+let tool = null;   // { mode: 'pick' | 'draw', userId, level, found, busy, pts }
+function startTool(mode, userId) {
   close(); closeTeam(); $('panel').classList.remove('open'); $('list').classList.remove('open'); setAdd(false);
-  draw = { userId, pts: [] }; $('drawwho').textContent = fullName(USERS[userId]); $('drawname').value = '';
-  $('drawbar').style.display = 'block'; drawUpd();
+  tool = { mode, userId, level: 'gmina', found: null, busy: false, pts: [] };
+  document.body.classList.add('tooling'); renderTool();
 }
-function drawUpd() {
-  drawLayer.clearLayers(); if (!draw) return; const pts = draw.pts;
-  if (pts.length >= 2) L.polygon(pts, { renderer: TR, pane: 'tereny', interactive: false, color: '#111827', weight: 3, dashArray: '6 6', fillColor: '#111827', fillOpacity: 0.12 }).addTo(drawLayer);
-  pts.forEach(p => L.circleMarker(p, { renderer: TR, pane: 'tereny', interactive: false, radius: 6, color: '#fff', weight: 2, fillColor: '#111827', fillOpacity: 1 }).addTo(drawLayer));
-  $('drawcnt').textContent = pts.length + ' pkt'; $('drawsave').disabled = pts.length < 3;
+function endTool(back) { tool = null; toolLayer.clearLayers(); document.body.classList.remove('tooling'); if (back) openTeam(); }
+// podgląd terenu czytelny na zdjęciu lotniczym: biała linia z ciemną obwódką
+function hiPoly(poly, dashed) {
+  L.polygon(poly, { renderer: TR, pane: 'tereny', interactive: false, color: '#172033', weight: 7, opacity: 0.55, fill: false }).addTo(toolLayer);
+  L.polygon(poly, { renderer: TR, pane: 'tereny', interactive: false, color: '#fff', weight: 3, dashArray: dashed ? '8 6' : null, fillColor: '#fff', fillOpacity: 0.18 }).addTo(toolLayer);
 }
-function addVertex(ll) { draw.pts.push([+ll.lat.toFixed(6), +ll.lng.toFixed(6)]); drawUpd(); }
-function endDraw() { draw = null; drawLayer.clearLayers(); $('drawbar').style.display = 'none'; }
-$('drawundo').onclick = () => { if (draw) { draw.pts.pop(); drawUpd(); } };
-$('drawcancel').onclick = () => { endDraw(); openTeam(); };
-$('drawsave').onclick = async () => {
-  if (!draw || draw.pts.length < 3) return; $('drawsave').disabled = true;
-  const { error } = await sb.from('tereny').insert({ user_id: draw.userId, nazwa: $('drawname').value.trim() || null, poly: draw.pts });
-  if (error) { $('drawsave').disabled = false; msg('Nie zapisano terenu: ' + error.message, 5000); return; }
-  endDraw(); msg('Teren zapisany');
-  try { await loadTeam(); } catch (e) {}
-  openTeam();
-};
+function renderTool() {
+  toolLayer.clearLayers(); if (!tool) return;
+  const who = esc(fullName(USERS[tool.userId])); let h;
+  if (tool.mode === 'pick') {
+    h = `<div class="tt">Teren dla: ${who}</div>
+      <div class="seg" id="lvl"><button data-l="gmina" class="${tool.level === 'gmina' ? 'on' : ''}">Gmina</button><button data-l="powiat" class="${tool.level === 'powiat' ? 'on' : ''}">Powiat</button></div>` +
+      (tool.found ? `<div class="found">${ic('check')}${esc(tool.found.name)}</div>`
+                  : `<div class="ts">${tool.busy ? 'Pobieram granicę z GUGiK…' : 'Stuknij w mapę w środku ' + (tool.level === 'gmina' ? 'gminy' : 'powiatu') + ', którą chcesz przydzielić.'}</div>`) +
+      `<div class="r"><button data-a="cancel">Anuluj</button><button class="pri" data-a="save" ${tool.found ? '' : 'disabled'}>${ic('check')}Przydziel</button></div>`;
+    if (tool.found) hiPoly(tool.found.poly, false);
+  } else {
+    const pts = tool.pts;
+    h = `<div class="tt">Rysujesz teren dla: ${who}</div><div class="ts">Stukaj w mapę w narożnikach obszaru. Punkty: ${pts.length} (min. 3)</div>
+      <input id="toolname" placeholder="Nazwa terenu, np. Końskie – północ" maxlength="80" value="${esc(tool.name || '')}">
+      <div class="r"><button data-a="undo" ${pts.length ? '' : 'disabled'}>${ic('undo')}Cofnij</button><button data-a="cancel">Anuluj</button><button class="pri" data-a="save" ${pts.length >= 3 ? '' : 'disabled'}>${ic('check')}Zapisz</button></div>`;
+    if (pts.length >= 2) hiPoly(pts, true);
+    pts.forEach(p => L.circleMarker(p, { renderer: TR, pane: 'tereny', interactive: false, radius: 6, color: '#fff', weight: 2, fillColor: '#172033', fillOpacity: 1 }).addTo(toolLayer));
+  }
+  $('tool').innerHTML = h;
+}
+async function toolClick(ll) {
+  if (tool.mode === 'draw') { tool.name = ($('toolname') || {}).value; tool.pts.push([+ll.lat.toFixed(6), +ll.lng.toFixed(6)]); renderTool(); return; }
+  if (tool.busy) return; tool.busy = true; tool.found = null; renderTool();
+  const t = tool;
+  try { const f = await fetchBoundary(ll.lat, ll.lng, t.level); if (tool !== t) return; t.found = f; }
+  catch (e) { msg(e.message || 'Nie udało się pobrać granicy. Sprawdź internet.', 4000); }
+  t.busy = false; if (tool === t) { renderTool(); if (t.found) map.fitBounds(L.latLngBounds(t.found.poly.flat()), { padding: [40, 40] }); }
+}
+$('tool').addEventListener('click', async e => {
+  const l = e.target.closest('[data-l]'); if (l && tool) { tool.level = l.dataset.l; tool.found = null; renderTool(); return; }
+  const b = e.target.closest('button[data-a]'); if (!b || !tool) return; const a = b.dataset.a;
+  if (a === 'cancel') { endTool(true); return; }
+  if (a === 'undo') { tool.name = ($('toolname') || {}).value; tool.pts.pop(); renderTool(); return; }
+  if (a === 'save') {
+    const row = tool.mode === 'pick'
+      ? { user_id: tool.userId, nazwa: tool.found.name, poly: tool.found.poly, teryt: tool.found.teryt }
+      : { user_id: tool.userId, nazwa: ($('toolname').value || '').trim() || null, poly: tool.pts };
+    b.disabled = true;
+    const { error } = await sb.from('tereny').insert(row);
+    if (error) { b.disabled = false; msg('Nie zapisano terenu: ' + error.message, 5000); return; }
+    msg('Przydzielono teren' + (row.nazwa ? ': ' + row.nazwa : ''));
+    try { await loadTeam(); } catch (_) {}
+    endTool(true);
+  }
+});
 
 // ---------- Panel „Zespół i tereny” ----------
 function openTeam() {
@@ -219,46 +308,47 @@ $('teamclose').onclick = closeTeam;
 
 function terList(userId, canEdit) {
   const list = TER.filter(t => t.user_id === userId);
-  if (!list.length) return '<div class="ter none">brak przydzielonego terenu</div>';
-  return list.map(t => `<div class="ter"><span class="dot" style="background:${tcolor(t)}"></span><span class="tn">${esc(t.nazwa || 'Teren bez nazwy')}</span>` +
+  const rows = list.map(t => `<div class="ter"><span class="dot" style="background:${tcolor(t)}"></span><span class="tn">${esc(t.nazwa || 'Teren bez nazwy')}</span>` +
     `<button data-a="show" data-t="${t.id}">Pokaż</button>` + (canEdit ? `<button class="del" data-a="del" data-t="${t.id}">Usuń</button>` : '') + '</div>').join('');
+  return `<div class="ters">${rows || '<div class="ter none">Brak przydzielonego terenu</div>'}</div>`;
 }
+const assignBtns = () => `<div class="two"><button data-a="pick">${ic('map')}Gmina / powiat</button><button class="sec" data-a="draw">${ic('pencil')}Narysuj</button></div>`;
 function fillTeam() {
   const all = Object.values(USERS), byName = (a, b) => fullName(a).localeCompare(fullName(b), 'pl');
   const managers = all.filter(u => u.rola === 'manager').sort(byName);
   let h = '';
   if (isAdmin()) {
     $('teamtitle').textContent = 'Zespół i tereny';
-    $('teamsub').textContent = 'Ty przydzielasz menedżerom handlowców i główny teren.';
+    $('teamsub').textContent = 'Przydzielasz menedżerom handlowców i główny teren.';
     const roleSel = u => `<select data-f="rola" ${u.id === ME.id ? 'disabled' : ''}>` +
       Object.entries(ROLE_LBL).map(([k, v]) => `<option value="${k}" ${u.rola === k ? 'selected' : ''}>${v}</option>`).join('') + '</select>';
-    const mgrSel = u => '<select data-f="manager_id"><option value="">— brak —</option>' +
+    const mgrSel = u => '<select data-f="manager_id"><option value="">brak</option>' +
       managers.map(m => `<option value="${m.id}" ${u.manager_id === m.id ? 'selected' : ''}>${esc(fullName(m))}</option>`).join('') + '</select>';
     const card = u => {
       const team = all.filter(x => x.rola === 'handlowiec' && x.manager_id === u.id).sort(byName).map(fullName);
       return `<div class="card" data-u="${u.id}">` +
         `<input class="nm" data-f="imie" value="${esc(u.imie || '')}" placeholder="Wpisz imię i nazwisko">` +
         `<small>${esc(u.email || '')}</small>` +
-        `<div class="cr"><span>Rola: ${roleSel(u)}</span>` + (u.rola === 'handlowiec' ? `<span>Menedżer: ${mgrSel(u)}</span>` : '') + '</div>' +
-        (u.rola === 'manager' ? `<small>Handlowcy: ${team.length ? esc(team.join(', ')) : 'brak – przypisz ich w kartach handlowców poniżej'}</small>` : '') +
-        (u.rola === 'handlowiec' && !u.manager_id ? '<small style="color:#dc2626">Bez menedżera handlowiec nic nie widzi.</small>' : '') +
-        (u.rola !== 'admin' ? terList(u.id, true) + `<button class="drawb" data-a="draw">✏️ Narysuj ${TER.some(t => t.user_id === u.id) ? 'kolejny ' : ''}teren</button>` : '') +
+        `<div class="cr"><label>Rola ${roleSel(u)}</label>` + (u.rola === 'handlowiec' ? `<label>Menedżer ${mgrSel(u)}</label>` : '') + '</div>' +
+        (u.rola === 'manager' ? `<small>${team.length ? 'Handlowcy: ' + esc(team.join(', ')) : 'Nie ma jeszcze handlowców – wybierz menedżera w karcie handlowca.'}</small>` : '') +
+        (u.rola === 'handlowiec' && !u.manager_id ? '<small class="warn">Bez menedżera handlowiec nie widzi żadnych domów.</small>' : '') +
+        (u.rola !== 'admin' ? terList(u.id, true) + assignBtns() : '') +
         '</div>';
     };
-    h += '<div class="hint">Nowe konto dodajesz w Supabase → Authentication → Add user. Pojawi się tutaj jako handlowiec bez menedżera – ustaw mu rolę i menedżera.</div>';
-    h += '<h4>Menedżerowie</h4>' + (managers.map(card).join('') || '<div class="hint">Brak menedżerów.</div>');
-    h += '<h4>Handlowcy</h4>' + (all.filter(u => u.rola === 'handlowiec').sort(byName).map(card).join('') || '<div class="hint">Brak handlowców.</div>');
-    h += '<h4>Administratorzy</h4>' + all.filter(u => u.rola === 'admin').sort(byName).map(card).join('');
+    h += '<div class="hint">Nowe konto dodajesz w Supabase (Authentication, Add user). Pojawi się tutaj jako handlowiec bez menedżera.</div>';
+    h += '<div class="h">Menedżerowie</div>' + (managers.map(card).join('') || '<div class="hint">Nie ma jeszcze menedżerów.</div>');
+    h += '<div class="h">Handlowcy</div>' + (all.filter(u => u.rola === 'handlowiec').sort(byName).map(card).join('') || '<div class="hint">Nie ma jeszcze handlowców.</div>');
+    h += '<div class="h">Administratorzy</div>' + all.filter(u => u.rola === 'admin').sort(byName).map(card).join('');
   } else {
     $('teamtitle').textContent = 'Moi handlowcy i tereny';
     $('teamsub').textContent = 'Przydzielasz swoim handlowcom konkretne tereny.';
-    h += `<h4>Twój teren</h4><div class="card"><div class="nmt">${esc(fullName(ME))}</div><small>przydziela administrator</small>${terList(ME.id, false)}</div>`;
+    h += `<div class="h">Twój teren</div><div class="card"><div class="nmt">${esc(fullName(ME))}</div><small>Przydziela administrator</small>${terList(ME.id, false)}</div>`;
     const mine = all.filter(u => u.rola === 'handlowiec' && u.manager_id === ME.id).sort(byName);
-    h += '<h4>Twoi handlowcy</h4>';
+    h += '<div class="h">Twoi handlowcy</div>';
     h += mine.map(u => `<div class="card" data-u="${u.id}"><div class="nmt">${esc(fullName(u))}</div><small>${esc(u.email || '')}</small>` +
-      terList(u.id, true) + `<button class="drawb" data-a="draw">✏️ Narysuj ${TER.some(t => t.user_id === u.id) ? 'kolejny ' : ''}teren</button></div>`).join('') ||
+      terList(u.id, true) + assignBtns() + '</div>').join('') ||
       '<div class="hint">Administrator nie przydzielił Ci jeszcze handlowców.</div>';
-    h += '<div class="hint">Handlowiec widzi tylko domy, które leżą jednocześnie w jego terenie i w Twoim terenie.</div>';
+    h += '<div class="hint">Handlowiec widzi tylko domy, które leżą jednocześnie w jego terenie i w Twoim.</div>';
   }
   $('teambody').innerHTML = h;
 }
@@ -282,7 +372,7 @@ $('teambody').addEventListener('change', e => {
 });
 $('teambody').addEventListener('click', async e => {
   const b = e.target.closest('button[data-a]'); if (!b) return; const a = b.dataset.a;
-  if (a === 'draw') { startDraw(b.closest('[data-u]').dataset.u); return; }
+  if (a === 'pick' || a === 'draw') { startTool(a, b.closest('[data-u]').dataset.u); return; }
   const t = TER.find(x => String(x.id) === b.dataset.t); if (!t) return;
   if (a === 'show') { closeTeam(); fitTer([t]); return; }
   if (a === 'del') {
@@ -294,18 +384,25 @@ $('teambody').addEventListener('click', async e => {
 });
 
 // ---------- Karta pinezki ----------
+function renderTiles() {
+  const list = TILES.filter(forMe);
+  $('tiles').innerHTML = list.map((k, i) => `<button class="st${list.length % 2 && i === list.length - 1 ? ' wide' : ''}" data-s="${k}" style="--c:${STAT[k].color}">${ic(STAT[k].icon)}${STAT[k].label}</button>`).join('');
+}
 function open(p) {
   cur = p;
   $('t').textContent = title(p);
-  const src = p.zrodlo === 'stare' ? 'Twoja wcześniejsza pinezka' : p.zrodlo === 'reczne' ? 'Dodane ręcznie' : ('Wykryte automatycznie' + (p.pewnosc ? ' – ' + p.pewnosc : ''));
-  $('sub').textContent = src + (p.gmina ? ' · gm. ' + p.gmina : '') + (me ? ' · ' + fmtDist(dist(me, p)) + ' stąd' : '');
+  const src = p.zrodlo === 'reczne' ? 'Dodany ręcznie'
+    : !isAdmin() ? 'Dom z fotowoltaiką'
+    : p.zrodlo === 'stare' ? 'Twoja wcześniejsza pinezka' : 'Wykryty automatycznie' + (p.pewnosc ? ', ' + p.pewnosc : '');
+  $('sub').innerHTML = [src, p.gmina ? 'gm. ' + p.gmina : '', me ? fmtDist(dist(me, p)) + ' stąd' : ''].filter(Boolean).map(s => `<span>${esc(s)}</span>`).join('');
   $('nav').href = navUrl(p);
   $('gm').href = `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`;
   document.querySelectorAll('.st').forEach(b => b.classList.toggle('on', b.dataset.s === p.status));
   document.querySelectorAll('.pvb').forEach(b => b.classList.toggle('on', b.dataset.v === p.pv));
+  $('delbtn').querySelector('span').textContent = p.status === 'usun' ? 'Przywróć pinezkę' : 'Usuń pinezkę';
   $('note').value = p.notatka || '';
-  $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmieniono: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) +
-    (p.zmienil ? ' · ' + uname(p.zmienil) : '') : '';
+  $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmiana: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) +
+    (p.zmienil ? ', ' + uname(p.zmienil) : '') : '';
   $('sheet').classList.add('open'); $('panel').classList.remove('open'); $('list').classList.remove('open');
 }
 function close() { $('sheet').classList.remove('open'); cur = null; }
@@ -326,15 +423,17 @@ async function save(p, patch) {
     msg(/uprawnie|row-level/i.test(e.message || '') ? 'Brak uprawnień do tej zmiany.' : 'Nie zapisano – sprawdź internet i spróbuj ponownie.', 4000); return false;
   } finally { busy = false; }
 }
-document.querySelectorAll('.st').forEach(b => b.onclick = async () => {
-  if (!cur) return; if (b.dataset.s === 'usun' && !isAdmin()) return;
-  const p = cur; const s = p.status === b.dataset.s ? null : b.dataset.s;
+async function setStatus(s0) {
+  if (!cur) return; if (!forMe(s0)) return;
+  const p = cur; const s = p.status === s0 ? null : s0;
   const patch = { status: s, notatka: $('note').value.trim() || null };
   if (s === 'umowa' && !p.pv) patch.pv = 'jest';
   if (!(await save(p, patch))) return;
   if (s === 'usun') { close(); msg('Pinezka usunięta. Przywrócisz ją w Menu → Usunięte.', 3500); }
   else msg(s ? 'Zapisano: ' + STAT[s].label : 'Status wyczyszczony');
-});
+}
+$('tiles').addEventListener('click', e => { const b = e.target.closest('.st'); if (b) setStatus(b.dataset.s); });
+$('delbtn').onclick = () => { if (isAdmin()) setStatus('usun'); };
 document.querySelectorAll('.pvb').forEach(b => b.onclick = async () => {
   if (!cur) return; const p = cur; const v = p.pv === b.dataset.v ? null : b.dataset.v;
   if (await save(p, { pv: v })) msg(v === 'jest' ? 'Zapisano: jest PV' : v === 'nie' ? 'Zapisano: nie ma PV' : 'Wyczyszczono informację o PV');
@@ -362,9 +461,9 @@ $('me').onclick = () => startGps(true);
 function fillList() {
   const ref = me || { lat: map.getCenter().lat, lon: map.getCenter().lng };
   const vis = P.filter(p => STAT[cat(p)] && STAT[cat(p)].on).map(p => [dist(ref, p), p]).sort((a, b) => a[0] - b[0]).slice(0, 40);
-  $('listsub').textContent = (me ? 'od Twojej pozycji' : 'od środka mapy (włącz ◎ dla GPS)') + ' · widoczne filtry';
+  $('listsub').textContent = (me ? 'Od Twojej pozycji' : 'Od środka mapy (włącz lokalizację, by liczyć od siebie)') + ', według filtrów';
   $('ul').innerHTML = vis.map(([d, p]) =>
-    `<li data-id="${esc(p.id)}"><span class="dot" style="background:${STAT[cat(p)].color}"></span><div class="t"><div>${esc(title(p))}</div><small>${fmtDist(d)}${p.notatka ? ' · ' + esc(p.notatka) : ''}</small></div><a href="${navUrl(p)}" target="_blank" rel="noopener">Jedź</a></li>`).join('') || '<li>Brak pinezek przy obecnych filtrach.</li>';
+    `<li data-id="${esc(p.id)}"><span class="dot" style="background:${STAT[cat(p)].color}"></span><div class="t"><div>${esc(title(p))}</div><small>${fmtDist(d)}${p.notatka ? ', ' + esc(p.notatka) : ''}</small></div><a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></li>`).join('') || '<li>Brak domów przy obecnych filtrach.</li>';
 }
 $('listbtn').onclick = () => { fillList(); $('list').classList.add('open'); close(); $('panel').classList.remove('open'); };
 $('listclose').onclick = () => $('list').classList.remove('open');
@@ -447,7 +546,7 @@ $('updfile').onchange = async e => {
   } catch (err) { msg('Aktualizacja nieudana: ' + (err.message || err), 6000); }
 };
 
-// ---------- Logowanie ----------
+// ---------- Eksport ocen (format bez zmian – korzysta z niego model) ----------
 $('exportbtn').onclick = () => {
   if (!isAdmin()) return;
   const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne').map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
@@ -457,6 +556,8 @@ $('exportbtn').onclick = () => {
   a.download = 'pv_weryfikacja_' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
   msg('Wyeksportowano ' + rows.length + ' pinezek z Twoimi ocenami. Wyślij ten plik do Claude.', 5000);
 };
+
+// ---------- Logowanie i start ----------
 $('reloadbtn').onclick = async () => { $('panel').classList.remove('open'); try { await loadTeam(); } catch (e) {} reload(); };
 $('logoutbtn').onclick = async () => { await sb.auth.signOut(); location.reload(); };
 $('loginform').addEventListener('submit', async e => {
@@ -472,10 +573,10 @@ async function start(fresh) {
   try { await loadMe(); await loadTeam(); }
   catch (e) { msg('Nie udało się pobrać danych konta: ' + (e.message || e), 6000); }
   await reload(true);
-  if (!ME || !ME.rola) msg('Twoje konto nie ma jeszcze przypisanej roli – skontaktuj się z administratorem.', 6000);
+  if (!ME || !ME.rola) msg('Twoje konto nie ma jeszcze przypisanej roli. Skontaktuj się z administratorem.', 6000);
   else if (!isAdmin()) {
     const mine = TER.filter(t => t.user_id === ME.id);
-    if (!mine.length) msg('Nie masz jeszcze przydzielonego terenu – poproś ' + (ME.rola === 'manager' ? 'administratora' : 'menedżera') + ' o przydział.', 6000);
+    if (!mine.length) msg('Nie masz jeszcze przydzielonego terenu. Poproś ' + (ME.rola === 'manager' ? 'administratora' : 'menedżera') + ' o przydział.', 6000);
     else if (fresh || !localStorage.getItem('pv_view')) fitTer(mine);
   } else if (!localStorage.getItem('pv_view') && P.length) map.fitBounds(L.latLngBounds(P.map(p => [p.lat, p.lon])), { padding: [30, 30] });
   startGps(false);
