@@ -16,11 +16,12 @@ const fullName = u => u ? (u.imie || u.email || '') : '';
 
 // ---------- Statusy i kolory ----------
 // who: 'admin' – widzi tylko administrator; 'team' – tylko menedżer i handlowiec; brak – wszyscy.
-// Zespół nie widzi rozróżnienia pewne/prawdopodobne/stare – dla nich to po prostu „Do odwiedzenia”.
+// Zespół nie widzi rozróżnienia pewne/prawdopodobne – dla nich to po prostu „Do odwiedzenia”.
+// Dawne „stare pinezki” administratora są liczone jako „Nowe – pewne”.
+// „usun” to pinezki ukryte przez administratora (kolumna ukryta_admin) – tylko u niego, zespół dalej je widzi.
 const STAT = {
   nowe_p:   { label: 'Nowe – pewne',          color: '#16a34a', on: true,  who: 'admin' },
   nowe_m:   { label: 'Nowe – prawdopodobne',  color: '#86efac', on: true,  who: 'admin' },
-  stare:    { label: 'Moje stare pinezki',    color: '#9ca3af', on: true,  who: 'admin' },
   nowe:     { label: 'Do odwiedzenia',        color: '#16a34a', on: true,  who: 'team' },
   reczne:   { label: 'Dodane ręcznie',        color: '#9333ea', on: true },
   ponownie: { label: 'Odwiedzić ponownie',    short: 'Ponownie',  color: '#f59e0b', on: true, icon: 'again', big: true },
@@ -29,7 +30,7 @@ const STAT = {
   umowa:    { label: 'Umowa',                 short: 'Umowy',     color: '#2563eb', on: true, icon: 'deal',  big: true },
   potencjal:{ label: 'Potencjał',             short: 'Potencjał', color: '#db2777', on: true, icon: 'star',  big: true, who: 'admin' },
   nie:      { label: 'Nie zainteresowany',    color: '#dc2626', on: false, icon: 'no' },
-  usun:     { label: 'Usunięte',              color: '#374151', on: false, who: 'admin' }
+  usun:     { label: 'Usunięte (tylko u mnie)', color: '#374151', on: false, who: 'admin' }
 };
 const forMe = k => !STAT[k].who || (STAT[k].who === 'admin') === isAdmin();
 const TILES = ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal', 'nie'];   // kolejność na karcie domu
@@ -62,11 +63,11 @@ const esc = t => String(t ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '
 const navUrl = p => `https://www.google.com/maps/dir/?api=1&destination=${p.lat},${p.lon}`;
 const title = p => p.adres ? p.adres + (p.miejscowosc && !p.adres.includes(p.miejscowosc) ? ', ' + p.miejscowosc : '') : 'Dom z PV (bez adresu)';
 function cat(p) {
-  if (p.status) return p.status;
+  if (isAdmin() && p.ukryta_admin) return 'usun';
+  if (p.status && STAT[p.status]) return p.status;
   if (p.zrodlo === 'reczne') return 'reczne';
   if (!isAdmin()) return 'nowe';
-  if (p.zrodlo === 'stare') return 'stare';
-  return p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m';
+  return p.zrodlo === 'stare' || p.pewnosc === 'pewne' ? 'nowe_p' : 'nowe_m';
 }
 function dist(a, b) { const R = 6371000, r = Math.PI / 180, dl = (b.lat - a.lat) * r, dn = (b.lon - a.lon) * r;
   const x = Math.sin(dl / 2) ** 2 + Math.cos(a.lat * r) * Math.cos(b.lat * r) * Math.sin(dn / 2) ** 2; return 2 * R * Math.asin(Math.sqrt(x)); }
@@ -85,7 +86,6 @@ async function loadMe() {
   ME = data || { id: user.id, email: user.email, rola: null };
   document.body.classList.remove('role-admin', 'role-manager', 'role-handlowiec');
   if (ME.rola) document.body.classList.add('role-' + ME.rola);
-  if (!isAdmin()) STAT.usun.on = false;
   const n = fullName(ME);
   $('who').innerHTML = `<div class="ava">${esc((n || '?').trim().charAt(0).toUpperCase())}</div><div><div class="n">${esc(n)}</div>` +
     (ME.imie ? `<small>${esc(ME.email || '')}</small>` : '') + `<span class="badge ${esc(ME.rola || '')}">${esc(ROLE_LBL[ME.rola] || 'Brak roli')}</span></div>`;
@@ -128,7 +128,10 @@ function render() {
     ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal'].filter(forMe).map(k => chip(k, STAT[k].short, cnt[k])).join('');
   $('filters').innerHTML = Object.entries(STAT).filter(([k]) => forMe(k)).map(([k, v]) =>
     `<label class="tog"><input type="checkbox" class="sw" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
+  for (const k of DEALS) $('cnt_' + k).textContent = P.filter(p => p.status === k).length || '';
+  $('produkty').innerHTML = [...new Set(P.map(p => p.produkt).filter(Boolean))].sort().map(v => `<option value="${esc(v)}">`).join('');
   if ($('list').classList.contains('open')) fillList();
+  if ($('deals').classList.contains('open')) fillDeals();
 }
 $('filters').addEventListener('change', e => {
   const k = e.target.dataset.k; if (!k) return; STAT[k].on = e.target.checked;
@@ -384,56 +387,129 @@ $('teambody').addEventListener('click', async e => {
 });
 
 // ---------- Karta pinezki ----------
+// Statusy z danymi klienta: przed zapisem trzeba wypełnić formularz (baza też tego pilnuje).
+const DEALS = ['lead', 'spotkanie', 'umowa'];
+const FORM = {
+  lead:      [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 0], ['klient_telefon', 'Telefon', 1, 'tel'], ['notatka', 'Notatka', 1, 'area']],
+  spotkanie: [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 0], ['klient_telefon', 'Telefon', 1, 'tel'], ['termin', 'Termin spotkania', 0, 'datetime-local'], ['notatka', 'Notatka', 1, 'area']],
+  umowa:     [['klient_imie', 'Imię', 1], ['klient_nazwisko', 'Nazwisko', 1], ['produkt', 'Sprzedany produkt', 1, 'text', 'produkty'], ['klient_telefon', 'Telefon', 0, 'tel'], ['notatka', 'Notatka', 0, 'area']]
+};
+const CLIENT = ['klient_imie', 'klient_nazwisko', 'klient_telefon', 'produkt', 'termin'];
+const digits = t => String(t || '').replace(/\D/g, '');
+const clientName = p => [p.klient_imie, p.klient_nazwisko].filter(Boolean).join(' ');
+const fmtWhen = t => t ? new Date(t).toLocaleString('pl-PL', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }) : '';
+const toLocalInput = t => { if (!t) return ''; const d = new Date(t); d.setMinutes(d.getMinutes() - d.getTimezoneOffset()); return d.toISOString().slice(0, 16); };
+function fieldError(k, v, req) {
+  const t = String(v || '').trim();
+  if (req && !t) return k === 'notatka' ? 'Wpisz notatkę' : k === 'produkt' ? 'Wpisz sprzedany produkt' : 'To pole jest wymagane';
+  if (k === 'klient_telefon' && t && digits(t).length < 9) return 'Numer telefonu musi mieć co najmniej 9 cyfr';
+  return '';
+}
+function renderKlient(p) {
+  const box = $('klient'), name = clientName(p);
+  if (!name && !p.klient_telefon && !p.produkt) { box.className = 'klient'; box.innerHTML = ''; return; }
+  const k = DEALS.includes(p.status) ? p.status : null, col = k ? STAT[k].color : '#6b7280';
+  const det = [k === 'umowa' && p.produkt ? 'Produkt: ' + p.produkt : '', k === 'spotkanie' && p.termin ? 'Spotkanie: ' + fmtWhen(p.termin) : '', p.klient_telefon || ''].filter(Boolean);
+  box.className = 'klient on'; box.style.setProperty('--c', col);
+  box.innerHTML = `<div class="kn">${ic(k ? STAT[k].icon : 'user')}${esc(name || 'Klient')}</div>` +
+    (det.length ? `<div class="kd">${det.map(esc).join('<br>')}</div>` : '') +
+    `<div class="kr">${p.klient_telefon ? `<a class="call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : ''}` +
+    (k ? `<button type="button" id="kedit">${ic('pencil')}Edytuj dane</button>` : '') + '</div>';
+  const b = $('kedit'); if (b) b.onclick = () => openForm(k);
+}
+function openForm(k) {
+  if (!cur) return; const p = cur, st = STAT[k];
+  $('formview').innerHTML = `<div class="fh" style="--c:${st.color}"><div class="fi">${ic(st.icon)}</div><div><b>${st.label}</b><small>${esc(title(p))}</small></div></div>` +
+    FORM[k].map(([f, label, req, type, list]) => {
+      const v = f === 'termin' ? toLocalInput(p[f]) : (p[f] || '');
+      const inp = type === 'area' ? `<textarea name="${f}" id="f_${f}">${esc(v)}</textarea>`
+        : `<input name="${f}" id="f_${f}" type="${type === 'tel' ? 'tel' : type || 'text'}" value="${esc(v)}"${type === 'tel' ? ' inputmode="tel" autocomplete="off"' : ''}${list ? ` list="${list}"` : ''}>`;
+      return `<div class="fld" data-f="${f}"><label for="f_${f}">${label} ${req ? '<i>*</i>' : '<em>(opcjonalnie)</em>'}</label>${inp}<div class="fe"></div></div>`;
+    }).join('') +
+    `<div class="fbtn"><button type="button" data-a="cancel">Anuluj</button><button type="submit" class="pri">Zapisz: ${st.label}</button></div>` +
+    (p.status === k ? `<div class="foot"><button type="button" class="lnk red" data-a="clear">${ic('close')}Usuń status „${st.label}”</button></div>` : '');
+  $('formview').dataset.k = k; $('sheet').classList.add('form'); $('sheet').scrollTop = 0;
+  const first = FORM[k].find(([f, , req]) => req && !String(p[f] || '').trim()); if (first) setTimeout(() => $('f_' + first[0]).focus(), 250);
+}
+function closeForm() { $('sheet').classList.remove('form'); $('formview').innerHTML = ''; }
+$('formview').addEventListener('click', e => {
+  const a = e.target.closest('[data-a]'); if (!a) return;
+  if (a.dataset.a === 'cancel') closeForm();
+  if (a.dataset.a === 'clear') { const k = $('formview').dataset.k; closeForm(); setStatus(k, true); }
+});
+$('formview').addEventListener('submit', async e => {
+  e.preventDefault(); if (!cur) return; const k = $('formview').dataset.k, p = cur, patch = { status: k };
+  let bad = null;
+  for (const [f, , req] of FORM[k]) {
+    const el = $('f_' + f), err = fieldError(f, el.value, req), box = el.closest('.fld');
+    box.classList.toggle('bad', !!err); box.querySelector('.fe').textContent = err; if (err && !bad) bad = el;
+    patch[f] = f === 'termin' ? (el.value ? new Date(el.value).toISOString() : null) : (el.value.trim() || null);
+  }
+  if (bad) { bad.focus(); return; }
+  if (k === 'umowa' && !p.pv) patch.pv = 'jest';
+  if (await save(p, patch)) { closeForm(); msg('Zapisano: ' + STAT[k].label); }
+});
 function renderTiles() {
   const list = TILES.filter(forMe);
   $('tiles').innerHTML = list.map((k, i) => `<button class="st${list.length % 2 && i === list.length - 1 ? ' wide' : ''}" data-s="${k}" style="--c:${STAT[k].color}">${ic(STAT[k].icon)}${STAT[k].label}</button>`).join('');
 }
 function open(p) {
+  if (cur !== p) closeForm();
   cur = p;
   $('t').textContent = title(p);
   const src = p.zrodlo === 'reczne' ? 'Dodany ręcznie'
     : !isAdmin() ? 'Dom z fotowoltaiką'
     : p.zrodlo === 'stare' ? 'Twoja wcześniejsza pinezka' : 'Wykryty automatycznie' + (p.pewnosc ? ', ' + p.pewnosc : '');
+  renderKlient(p);
   $('sub').innerHTML = [src, p.gmina ? 'gm. ' + p.gmina : '', me ? fmtDist(dist(me, p)) + ' stąd' : ''].filter(Boolean).map(s => `<span>${esc(s)}</span>`).join('');
   $('nav').href = navUrl(p);
   $('gm').href = `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`;
   document.querySelectorAll('.st').forEach(b => b.classList.toggle('on', b.dataset.s === p.status));
   document.querySelectorAll('.pvb').forEach(b => b.classList.toggle('on', b.dataset.v === p.pv));
-  $('delbtn').querySelector('span').textContent = p.status === 'usun' ? 'Przywróć pinezkę' : 'Usuń pinezkę';
+  $('delbtn').querySelector('span').textContent = p.ukryta_admin ? 'Przywróć pinezkę' : 'Usuń pinezkę (tylko u mnie)';
   $('note').value = p.notatka || '';
   $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmiana: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) +
     (p.zmienil ? ', ' + uname(p.zmienil) : '') : '';
   $('sheet').classList.add('open'); $('panel').classList.remove('open'); $('list').classList.remove('open');
 }
-function close() { $('sheet').classList.remove('open'); cur = null; }
+function close() { $('sheet').classList.remove('open'); closeForm(); cur = null; }
 $('close').onclick = close;
 
 let busy = false;
 async function save(p, patch) {
   if (busy) { msg('Chwila, zapisuję…'); return false; }
-  busy = true; const prev = { status: p.status, notatka: p.notatka, pv: p.pv, zmieniono: p.zmieniono, zmienil: p.zmienil };
+  const FIELDS = ['status', 'notatka', 'pv', 'zmieniono', 'zmienil', 'ukryta_admin', ...CLIENT];
+  busy = true; const prev = Object.fromEntries(FIELDS.map(f => [f, p[f]]));
   Object.assign(p, patch, { zmieniono: new Date().toISOString(), zmienil: ME ? ME.id : p.zmienil }); render(); if (cur === p) open(p);
   try {
-    const { data, error } = await sb.from('pins').update({ status: p.status, notatka: p.notatka, pv: p.pv || null, zmieniono: p.zmieniono }).eq('id', p.id).select('id');
+    const row = { status: p.status, notatka: p.notatka, pv: p.pv || null, zmieniono: p.zmieniono };
+    for (const f of CLIENT) row[f] = p[f] ?? null;
+    if (isAdmin()) row.ukryta_admin = !!p.ukryta_admin;
+    const { data, error } = await sb.from('pins').update(row).eq('id', p.id).select('id');
     if (error) throw error;
     if (!data || !data.length) throw new Error('brak uprawnień');
     return true;
   } catch (e) {
     Object.assign(p, prev); render(); if (cur === p) open(p);
-    msg(/uprawnie|row-level/i.test(e.message || '') ? 'Brak uprawnień do tej zmiany.' : 'Nie zapisano – sprawdź internet i spróbuj ponownie.', 4000); return false;
+    const m = e.message || '';
+    msg(/^Wpisz/.test(m) ? m + '.' : /uprawnie|row-level/i.test(m) ? 'Brak uprawnień do tej zmiany.' : 'Nie zapisano – sprawdź internet i spróbuj ponownie.', 4000); return false;
   } finally { busy = false; }
 }
-async function setStatus(s0) {
+async function setStatus(s0, clear) {
   if (!cur) return; if (!forMe(s0)) return;
+  if (DEALS.includes(s0) && !clear) { openForm(s0); return; }
   const p = cur; const s = p.status === s0 ? null : s0;
   const patch = { status: s, notatka: $('note').value.trim() || null };
-  if (s === 'umowa' && !p.pv) patch.pv = 'jest';
   if (!(await save(p, patch))) return;
-  if (s === 'usun') { close(); msg('Pinezka usunięta. Przywrócisz ją w Menu → Usunięte.', 3500); }
-  else msg(s ? 'Zapisano: ' + STAT[s].label : 'Status wyczyszczony');
+  msg(s ? 'Zapisano: ' + STAT[s].label : 'Status wyczyszczony');
 }
 $('tiles').addEventListener('click', e => { const b = e.target.closest('.st'); if (b) setStatus(b.dataset.s); });
-$('delbtn').onclick = () => { if (isAdmin()) setStatus('usun'); };
+$('delbtn').onclick = async () => {
+  if (!isAdmin() || !cur) return; const p = cur, hide = !p.ukryta_admin;
+  if (!(await save(p, { ukryta_admin: hide }))) return;
+  if (hide) { close(); msg('Pinezka zniknęła tylko u Ciebie – zespół nadal ją widzi. Przywrócisz ją w Menu → Usunięte.', 4500); }
+  else msg('Pinezka przywrócona');
+};
 document.querySelectorAll('.pvb').forEach(b => b.onclick = async () => {
   if (!cur) return; const p = cur; const v = p.pv === b.dataset.v ? null : b.dataset.v;
   if (await save(p, { pv: v })) msg(v === 'jest' ? 'Zapisano: jest PV' : v === 'nie' ? 'Zapisano: nie ma PV' : 'Wyczyszczono informację o PV');
@@ -470,6 +546,44 @@ $('listclose').onclick = () => $('list').classList.remove('open');
 $('ul').addEventListener('click', e => {
   if (e.target.closest('a')) return; const li = e.target.closest('li[data-id]'); if (!li) return;
   const p = byId[li.dataset.id]; if (!p) return; map.setView([p.lat, p.lon], Math.max(map.getZoom(), 13)); open(p);
+});
+
+// ---------- Sprzedaż: Leady zebrane, Spotkania umówione, Umowy ----------
+let dealTab = 'lead';
+const DEAL_LBL = { lead: 'Leady', spotkanie: 'Spotkania', umowa: 'Umowy' };
+function openDeals(k) {
+  dealTab = k; $('dealsq').value = ''; fillDeals();
+  $('deals').classList.add('open'); close(); $('panel').classList.remove('open'); $('list').classList.remove('open'); closeTeam();
+}
+function fillDeals() {
+  const q = $('dealsq').value.trim().toLowerCase();
+  $('dealtabs').innerHTML = DEALS.map(k => `<button data-k="${k}" class="${k === dealTab ? 'on' : ''}">${DEAL_LBL[k]} <b>${P.filter(p => p.status === k).length}</b></button>`).join('');
+  let list = P.filter(p => p.status === dealTab);
+  if (q) list = list.filter(p => [clientName(p), title(p), p.gmina, p.klient_telefon, p.produkt, p.notatka].join(' ').toLowerCase().includes(q));
+  list.sort(dealTab === 'spotkanie'
+    ? (a, b) => (a.termin ? 0 : 1) - (b.termin ? 0 : 1) || String(a.termin || '').localeCompare(String(b.termin || '')) || String(b.zmieniono).localeCompare(String(a.zmieniono))
+    : (a, b) => String(b.zmieniono).localeCompare(String(a.zmieniono)));
+  $('dealssub').textContent = STAT[dealTab].label + (dealTab === 'spotkanie' ? ': najbliższe terminy na górze' : ': najnowsze na górze');
+  const c = STAT[dealTab].color;
+  $('dealsul').innerHTML = list.map(p => {
+    const info = [dealTab === 'umowa' && p.produkt ? 'Produkt: ' + p.produkt : '', dealTab === 'spotkanie' && p.termin ? 'Spotkanie: ' + fmtWhen(p.termin) : '', p.notatka || ''].filter(Boolean);
+    return `<li class="deal" data-id="${esc(p.id)}">` +
+      `<div class="d1"><span class="dot" style="background:${c}"></span><b>${esc(clientName(p) || 'Brak danych klienta')}</b><small>${esc(new Date(p.zmieniono).toLocaleDateString('pl-PL'))}</small></div>` +
+      `<div class="d2">${esc(title(p))}${p.gmina ? ', gm. ' + esc(p.gmina) : ''}</div>` +
+      (info.length ? `<div class="d3">${info.map(esc).join('<br>')}</div>` : '') +
+      `<div class="d4"><small>${p.zmienil ? 'Wpisał(a): ' + esc(uname(p.zmienil)) : ''}</small>` +
+      (p.klient_telefon ? `<a class="go call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : '') +
+      `<a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></div></li>`;
+  }).join('') || `<li class="empty">${q ? 'Nic nie pasuje do wyszukiwania.' : 'Nie ma jeszcze domów ze statusem „' + STAT[dealTab].label + '”. Pojawią się tu same, gdy ktoś nada ten status.'}</li>`;
+}
+document.querySelectorAll('[data-deals]').forEach(b => b.onclick = () => openDeals(b.dataset.deals));
+$('dealtabs').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) { dealTab = b.dataset.k; fillDeals(); } });
+$('dealsq').addEventListener('input', fillDeals);
+$('dealsclose').onclick = () => $('deals').classList.remove('open');
+$('dealsul').addEventListener('click', e => {
+  if (e.target.closest('a')) return; const li = e.target.closest('li[data-id]'); if (!li) return;
+  const p = byId[li.dataset.id]; if (!p) return;
+  $('deals').classList.remove('open'); map.setView([p.lat, p.lon], Math.max(map.getZoom(), 14)); open(p);
 });
 
 // ---------- Import pinezek z pliku ----------
@@ -525,7 +639,7 @@ $('updfile').onchange = async e => {
     const areas = [...new Set(rows.map(r => r.obszar).filter(Boolean))];
     if (!rows.length || !areas.length) { msg('Plik nie wygląda na plik powiatu.'); return; }
     await loadAll();
-    const touched = p => !!(p.status || p.pv || p.notatka || p.zrodlo === 'reczne');
+    const touched = p => !!(p.status || p.pv || p.notatka || p.zrodlo === 'reczne' || p.ukryta_admin);
     const inArea = P.filter(p => areas.includes(p.obszar));
     const newIds = new Set(rows.map(r => r.id));
     const toDelete = inArea.filter(p => !touched(p) && !newIds.has(p.id)).map(p => p.id);
@@ -549,8 +663,9 @@ $('updfile').onchange = async e => {
 // ---------- Eksport ocen (format bez zmian – korzysta z niego model) ----------
 $('exportbtn').onclick = () => {
   if (!isAdmin()) return;
-  const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne').map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
-    wynik: p.wynik, obszar: p.obszar, status: p.status, pv: p.pv || (p.status === 'umowa' ? 'jest' : null), zmieniono: p.zmieniono }));
+  // ukryte przez administratora eksportujemy jak dawniej, ze statusem 'usun' (gdy nie mają innego statusu)
+  const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne' || p.ukryta_admin).map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
+    wynik: p.wynik, obszar: p.obszar, status: p.status || (p.ukryta_admin ? 'usun' : null), pv: p.pv || (p.status === 'umowa' ? 'jest' : null), zmieniono: p.zmieniono }));
   const blob = new Blob([JSON.stringify(rows)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
   a.download = 'pv_weryfikacja_' + new Date().toISOString().slice(0, 10) + '.json'; document.body.appendChild(a); a.click(); a.remove();
