@@ -90,7 +90,7 @@ async function loadMe() {
   $('who').innerHTML = `<div class="ava">${esc((n || '?').trim().charAt(0).toUpperCase())}</div><div><div class="n">${esc(n)}</div>` +
     (ME.imie ? `<small>${esc(ME.email || '')}</small>` : '') + `<span class="badge ${esc(ME.rola || '')}">${esc(ROLE_LBL[ME.rola] || 'Brak roli')}</span></div>`;
   $('teambtn').querySelector('span').textContent = isAdmin() ? 'Zespół i tereny' : 'Moi handlowcy i tereny';
-  updTrackInfo(); flushTrack();
+  updTrackInfo(); await loadDay(); flushTrack();
   renderTiles();
 }
 async function loadTeam() {
@@ -99,21 +99,67 @@ async function loadTeam() {
   USERS = Object.fromEntries(u.data.map(x => [x.id, x])); TER = t.data;
   renderTer(); if ($('team').classList.contains('open')) fillTeam();
 }
-async function loadAll() {
+// Zespół wczytuje cały swój teren. Administrator (wiele powiatów) wczytuje tylko widoczny obszar mapy
+// oraz wszystkie leady/spotkania/umowy (do list i grafiku); liczniki liczy mu baza (pv_liczniki).
+const MINZ = 4;            // od tego przybliżenia administrator widzi pinezki (ok. 50 km szerokości na telefonie)
+let VIEWB = null, CNT = null;
+const viewMode = () => isAdmin();
+async function fetchWhere(fn) {
   let all = [], from = 0;
   for (;;) {
-    const { data, error } = await sb.from('pins').select('*').range(from, from + 999);
+    const { data, error } = await fn(sb.from('pins').select('*')).order('id').range(from, from + 999);
     if (error) throw error;
     all = all.concat(data); if (data.length < 1000) break; from += 1000;
   }
-  P = all; byId = Object.fromEntries(P.map(p => [p.id, p]));
-  render();
+  return all;
 }
+const fetchAllPins = () => fetchWhere(q => q);
+async function loadAll() {
+  if (!viewMode()) P = await fetchAllPins();
+  else {
+    const deals = await fetchWhere(q => q.in('status', DEALS));
+    let area = [];
+    if (map.getZoom() >= MINZ) {
+      const b = map.getBounds().pad(0.3); VIEWB = b;
+      area = await fetchWhere(q => q.gte('lat', b.getSouth()).lte('lat', b.getNorth()).gte('lon', b.getWest()).lte('lon', b.getEast()));
+    } else VIEWB = null;
+    const m = new Map(); for (const x of area.concat(deals)) m.set(x.id, x); P = [...m.values()];
+    refreshCounts(true);
+  }
+  byId = Object.fromEntries(P.map(p => [p.id, p]));
+  applyQueue(); render();
+}
+async function refreshCounts(now) {
+  if (!viewMode()) return;
+  clearTimeout(refreshCounts.t);
+  const go = async () => { try { const { data, error } = await sb.rpc('pv_liczniki'); if (!error) { CNT = Object.fromEntries(data.map(r => [r.kat, Number(r.n)])); render(); } } catch (e) {} };
+  if (now) go(); else refreshCounts.t = setTimeout(go, 800);
+}
+map.on('moveend', () => {
+  if (!viewMode() || !started) return; clearTimeout(map._pvT);
+  map._pvT = setTimeout(() => { if (map.getZoom() >= MINZ && !(VIEWB && VIEWB.contains(map.getBounds()))) reload(true); else render(); }, 450);
+});
 async function reload(quiet) {
   try { await loadAll(); if (!quiet) msg('Dane odświeżone (' + P.length + ' pinezek)'); }
   catch (e) { msg('Nie udało się pobrać danych: ' + (e.message || e), 5000); }
 }
 
+let lastCnt = () => 0;
+function renderStats() {
+  const C = lastCnt, todo = isAdmin() ? C('nowe_p') + C('nowe_m') : C('nowe');
+  const chip = (k, label, n) => `<span class="chip"><span class="dot" style="background:${STAT[k].color}"></span>${label} <b>${n}</b></span>`;
+  let h = '';
+  if (OQ.length) h += `<button class="chip wait" id="qchip">${ic('refresh')}Do wysłania <b>${OQ.length}</b></button>`;
+  if (tracked()) h += DAY ? `<button class="chip work on" data-day>W pracy</button>` : `<button class="chip work" data-day>${ic('next')}Zacznij dzień</button>`;
+  if (viewMode() && map.getZoom() < MINZ) h += `<button class="chip work" id="zoomchip">${ic('plus')}Przybliż, by zobaczyć domy</button>`;
+  $('stats').innerHTML = h + chip(isAdmin() ? 'nowe_p' : 'nowe', 'Do odwiedzenia', todo) +
+    ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal'].filter(forMe).map(k => chip(k, STAT[k].short, C(k))).join('');
+}
+$('stats').addEventListener('click', e => {
+  if (e.target.closest('#qchip')) { msg(OQ.length + ' zmian czeka na internet. Wyślę je automatycznie.', 3500); syncQueue(); }
+  if (e.target.closest('[data-day]')) { $('panel').classList.add('open'); }
+  if (e.target.closest('#zoomchip')) map.setZoom(MINZ);
+});
 function render() {
   layer.clearLayers(); const cnt = {}; for (const k in STAT) cnt[k] = 0;
   for (const p of P) {
@@ -123,14 +169,13 @@ function render() {
       fillColor: ring ? '#fff' : s.color, fillOpacity: 1, bubblingMouseEvents: false });
     m.on('click', e => { L.DomEvent.stop(e); if (editing()) { toolClick(e.latlng); return; } open(p); }); m.addTo(layer);
   }
-  const todo = isAdmin() ? cnt.nowe_p + cnt.nowe_m : cnt.nowe;
-  const chip = (k, label, n) => `<span class="chip"><span class="dot" style="background:${STAT[k].color}"></span>${label} <b>${n}</b></span>`;
-  $('stats').innerHTML = chip(isAdmin() ? 'nowe_p' : 'nowe', 'Do odwiedzenia', todo) +
-    ['ponownie', 'lead', 'spotkanie', 'umowa', 'potencjal'].filter(forMe).map(k => chip(k, STAT[k].short, cnt[k])).join('');
+  const C = viewMode() && CNT ? k => CNT[k] || 0 : k => cnt[k] || 0;
+  lastCnt = C;
+  renderStats();
   const mine = Object.keys(STAT).filter(forMe);
   $('filtsum').textContent = mine.filter(k => STAT[k].on).length + ' z ' + mine.length;
   $('filters').innerHTML = Object.entries(STAT).filter(([k]) => forMe(k)).map(([k, v]) =>
-    `<label class="tog"><input type="checkbox" class="sw" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${cnt[k]}</span></label>`).join('');
+    `<label class="tog"><input type="checkbox" class="sw" data-k="${k}" ${v.on ? 'checked' : ''}><span class="dot" style="background:${v.color}"></span>${v.label}<span class="cnt">${C(k)}</span></label>`).join('');
   for (const k of DEALS) $('cnt_' + k).textContent = P.filter(p => p.status === k).length || '';
   const today0 = new Date(); today0.setHours(0, 0, 0, 0);
   $('cnt_grafik').textContent = P.filter(p => p.status === 'spotkanie' && p.termin && new Date(p.termin) >= today0).length || '';
@@ -200,14 +245,18 @@ async function addPin(lat, lon) {
   const p = { id: 'r' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6), adres: null, miejscowosc: null, gmina: null,
     lat: +lat.toFixed(6), lon: +lon.toFixed(6), zrodlo: 'reczne', pewnosc: null, wynik: null, obszar: null, status: null, notatka: null, pv: 'jest',
     zmieniono: new Date().toISOString() };
-  const a = await reverseAddr(p.lat, p.lon); if (a) Object.assign(p, a);
-  const { error } = await sb.from('pins').insert(p);
-  if (error) {
+  const a = navigator.onLine ? await reverseAddr(p.lat, p.lon) : null; if (a) Object.assign(p, a);
+  let error = null;
+  if (OQ.length) error = new Error('offline');
+  else { try { ({ error } = await sb.from('pins').insert(p)); } catch (e) { error = e; } }
+  if (error && !isNet(error)) {
     msg(/row-level security/i.test(error.message) ? 'Możesz dodawać domy tylko na swoim terenie.' : 'Nie udało się dodać pinezki: ' + error.message, 5000);
     return;
   }
+  if (error) enqueue('insert', p, p);
   if (ME) p.zmienil = ME.id;
-  P.push(p); byId[p.id] = p; render(); open(p); msg('Dodano dom z PV' + (p.adres ? ': ' + p.adres : ''));
+  P.push(p); byId[p.id] = p; render(); open(p);
+  msg(error ? 'Dom zapisany w telefonie – wyślę go, gdy wróci internet.' : 'Dodano dom z PV' + (p.adres ? ': ' + p.adres : ''), 3500); refreshCounts();
 }
 const editing = () => !!tool && (tool.mode === 'pick' || tool.mode === 'draw');
 map.on('click', e => {
@@ -278,7 +327,7 @@ function renderTool() {
     let km = 0; for (let i = 1; i < pts.length; i++) km += dist(pts[i - 1], pts[i]) / 1000;
     const tm = t => new Date(t).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
     const dl = new Date(tool.day + 'T12:00:00').toLocaleDateString('pl-PL', { weekday: 'short', day: 'numeric', month: 'long' });
-    h = `<div class="tt">Trasa: ${who}</div><div class="ts">${pts.length ? `${tm(pts[0].czas)}–${tm(pts[pts.length - 1].czas)}, około ${km.toFixed(1).replace('.', ',')} km, ${pts.length} punktów` : 'Brak pozycji tego dnia. Trasa zapisuje się tylko, gdy aplikacja jest otwarta.'}</div>
+    h = `<div class="tt">Trasa: ${who}</div><div class="ts">${pts.length ? `${tm(pts[0].czas)}–${tm(pts[pts.length - 1].czas)}, około ${km.toFixed(1).replace('.', ',')} km, ${pts.length} punktów` : 'Brak pozycji tego dnia. Trasa zapisuje się tylko w czasie pracy („Zaczynam dzień”) i przy otwartej aplikacji. Pozycje są przechowywane 7 dni.'}</div>
       <div class="r"><button class="ico" data-a="prev" aria-label="Poprzedni dzień">${ic('back')}</button><button data-a="day" disabled style="opacity:1">${esc(dl)}</button><button class="ico" data-a="next" aria-label="Następny dzień" ${tool.day >= todayStr() ? 'disabled' : ''}>${ic('next')}</button><button class="pri" data-a="cancel">Zamknij</button></div>`;
     if (pts.length) {
       const ll = pts.map(p => [p.lat, p.lon]);
@@ -382,9 +431,19 @@ function fillTeam() {
         (u.rola === 'manager' ? `<small>${team.length ? 'Handlowcy: ' + esc(team.join(', ')) : 'Nie ma jeszcze handlowców – wybierz menedżera w karcie handlowca.'}</small>` : '') +
         (u.rola === 'handlowiec' && !u.manager_id ? '<small class="warn">Bez menedżera handlowiec nie widzi żadnych domów.</small>' : '') +
         (u.rola !== 'admin' ? terList(u.id, true) + assignBtns() : '') +
+        (u.id !== ME.id ? `<div class="accrow">${u.zablokowany ? '<span class="blocked">Konto zablokowane</span>' : ''}` +
+          `<button data-a="pass">Nowe hasło</button><button data-a="block" class="${u.zablokowany ? '' : 'red'}">${u.zablokowany ? 'Odblokuj' : 'Zablokuj'}</button></div>` +
+          `<div class="pwset" hidden><div class="pw"><input value="${genPass()}" aria-label="Nowe hasło"><button data-a="passok" class="pri">Ustaw</button></div></div>` : '') +
         '</div>';
     };
-    h += '<div class="hint">Nowe konto dodajesz w Supabase (Authentication, Add user). Pojawi się tutaj jako handlowiec bez menedżera.</div>';
+    h += `<details class="card addacc" id="addacc"><summary>${ic('plus')}Dodaj konto</summary><form id="accform" novalidate>
+      <div class="fld"><label for="a_imie">Imię i nazwisko</label><input id="a_imie" autocomplete="off"></div>
+      <div class="fld"><label for="a_email">E-mail (login)</label><input id="a_email" type="email" autocomplete="off"></div>
+      <div class="fld"><label for="a_haslo">Hasło (min. 8 znaków)</label><div class="pw"><input id="a_haslo" autocomplete="off" value="${genPass()}"><button type="button" data-a="gen">Nowe</button></div></div>
+      <div class="cr"><label>Rola <select id="a_rola">${Object.entries(ROLE_LBL).map(([k, v]) => `<option value="${k}" ${k === 'handlowiec' ? 'selected' : ''}>${v}</option>`).join('')}</select></label>
+        <label id="a_mgrl">Menedżer <select id="a_mgr"><option value="">brak</option>${managers.map(m => `<option value="${m.id}">${esc(fullName(m))}</option>`).join('')}</select></label></div>
+      <div class="fbtn"><button type="submit" class="pri">Utwórz konto</button></div>
+      <div class="hint" id="accres"></div></form></details>`;
     h += '<div class="h">Menedżerowie</div>' + (managers.map(card).join('') || '<div class="hint">Nie ma jeszcze menedżerów.</div>');
     h += '<div class="h">Handlowcy</div>' + (all.filter(u => u.rola === 'handlowiec').sort(byName).map(card).join('') || '<div class="hint">Nie ma jeszcze handlowców.</div>');
     h += '<div class="h">Administratorzy</div>' + all.filter(u => u.rola === 'admin').sort(byName).map(card).join('');
@@ -401,6 +460,38 @@ function fillTeam() {
   }
   $('teambody').innerHTML = h;
 }
+// ---------- Konta (administrator): funkcja pv-konta w Supabase ----------
+function genPass() {
+  const A = 'abcdefghjkmnpqrstuvwxyzABCDEFGHJKMNPQRSTUVWXYZ23456789', r = new Uint32Array(10); crypto.getRandomValues(r);
+  return Array.from(r, x => A[x % A.length]).join('');
+}
+async function konta(body) {
+  let res;
+  try { res = await sb.functions.invoke('pv-konta', { body }); } catch (e) { throw new Error('Brak połączenia z funkcją pv-konta.'); }
+  const { data, error } = res;
+  if (error) {
+    let m = error.message || '';
+    try { const j = await error.context.json(); if (j && j.error) m = j.error; } catch (_) {}
+    if (/Failed to send|not found|404|FunctionsFetchError|FunctionsRelayError/i.test(m)) m = 'Funkcja pv-konta nie jest jeszcze wdrożona w Supabase (instrukcja w KONTEKST.md).';
+    throw new Error(m);
+  }
+  if (data && data.error) throw new Error(data.error);
+  return data;
+}
+$('teambody').addEventListener('submit', async e => {
+  if (e.target.id !== 'accform') return; e.preventDefault();
+  const body = { akcja: 'utworz', imie: $('a_imie').value.trim(), email: $('a_email').value.trim(), haslo: $('a_haslo').value,
+    rola: $('a_rola').value, manager_id: $('a_rola').value === 'handlowiec' ? $('a_mgr').value || null : null };
+  if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(body.email)) { $('accres').textContent = 'Wpisz poprawny adres e-mail.'; return; }
+  if (body.haslo.length < 8) { $('accres').textContent = 'Hasło musi mieć co najmniej 8 znaków.'; return; }
+  const btn = e.target.querySelector('[type=submit]'); btn.disabled = true; $('accres').textContent = 'Tworzę konto…';
+  try {
+    await konta(body);
+    try { await loadTeam(); } catch (_) {} fillTeam(); $('addacc').open = true;
+    $('accres').innerHTML = `Konto utworzone. Przekaż tej osobie dane logowania:<br><b>${esc(body.email)}</b><br>hasło: <b>${esc(body.haslo)}</b>`;
+  } catch (err) { $('accres').textContent = err.message; btn.disabled = false; }
+});
+$('teambody').addEventListener('change', e => { if (e.target.id === 'a_rola') $('a_mgrl').hidden = e.target.value !== 'handlowiec'; }, true);
 async function setProfile(id, patch) {
   const prev = USERS[id];
   if (patch.rola && patch.rola !== 'handlowiec') patch.manager_id = null;
@@ -416,12 +507,30 @@ async function setProfile(id, patch) {
   fillTeam();
 }
 $('teambody').addEventListener('change', e => {
+  if (e.target.closest('#accform')) return;
   const f = e.target.dataset.f, card = e.target.closest('[data-u]'); if (!f || !card || !isAdmin()) return;
   const v = e.target.value.trim(); setProfile(card.dataset.u, { [f]: v || null });
 });
 $('teambody').addEventListener('click', async e => {
   const b = e.target.closest('button[data-a]'); if (!b) return; const a = b.dataset.a;
   if (a === 'pick' || a === 'draw') { startTool(a, b.closest('[data-u]').dataset.u); return; }
+  if (a === 'gen') { $('a_haslo').value = genPass(); return; }
+  const card = b.closest('[data-u]'), uid = card && card.dataset.u;
+  if (a === 'pass') { card.querySelector('.pwset').hidden = !card.querySelector('.pwset').hidden; return; }
+  if (a === 'passok') {
+    const pw = card.querySelector('.pwset input').value; b.disabled = true;
+    try { await konta({ akcja: 'haslo', user_id: uid, haslo: pw }); msg('Nowe hasło ustawione: ' + pw + ' – przekaż je tej osobie.', 8000); card.querySelector('.pwset').hidden = true; }
+    catch (err) { msg(err.message, 6000); }
+    b.disabled = false; return;
+  }
+  if (a === 'block') {
+    const blok = !USERS[uid].zablokowany;
+    if (blok && !b.classList.contains('sure')) { b.classList.add('sure'); b.textContent = 'Na pewno zablokować?'; setTimeout(() => { b.classList.remove('sure'); b.textContent = 'Zablokuj'; }, 4000); return; }
+    b.disabled = true;
+    try { await konta({ akcja: 'blokuj', user_id: uid, zablokuj: blok }); msg(blok ? 'Konto zablokowane – ta osoba nie zobaczy już żadnych danych.' : 'Konto odblokowane'); }
+    catch (err) { msg(err.message, 6000); }
+    try { await loadTeam(); } catch (_) {} fillTeam(); return;
+  }
   const t = TER.find(x => String(x.id) === b.dataset.t); if (!t) return;
   if (a === 'show') { closeTeam(); fitTer([t]); return; }
   if (a === 'del') {
@@ -460,8 +569,23 @@ function renderKlient(p) {
   box.innerHTML = `<div class="kn">${ic(k ? STAT[k].icon : 'user')}${esc(name || 'Klient')}</div>` +
     (det.length ? `<div class="kd">${det.map(esc).join('<br>')}</div>` : '') +
     `<div class="kr">${p.klient_telefon ? `<a class="call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : ''}` +
-    (k ? `<button type="button" id="kedit">${ic('pencil')}Edytuj dane</button>` : '') + '</div>';
+    (k ? `<button type="button" id="kedit">${ic('pencil')}Edytuj dane</button>` : '') + '</div>' +
+    (k ? `<div class="kown"><span>Zebrał(a): <b>${esc(uname(autor(p)) || '–')}</b></span>` +
+      (canAssign() ? `<label>Prowadzi <select id="kassign">${assignOptions(p)}</select></label>`
+                   : p.przypisany ? `<span>Prowadzi: <b>${esc(uname(p.przypisany))}</b></span>` : '') + '</div>' : '');
   const b = $('kedit'); if (b) b.onclick = () => openForm(k);
+  const a = $('kassign'); if (a) a.onchange = async () => {
+    const v = a.value || null; if (await save(p, { przypisany: v })) msg(v ? 'Przekazano: ' + uname(v) : 'Cofnięto przekazanie');
+  };
+}
+const canAssign = () => !!ME && (ME.rola === 'admin' || ME.rola === 'manager');
+function assignOptions(p) {
+  const o = (id, l) => `<option value="${id}" ${(p.przypisany || '') === id ? 'selected' : ''}>${esc(l)}</option>`;
+  let ppl;
+  if (isAdmin()) ppl = Object.values(USERS).filter(u => !u.zablokowany && (u.rola === 'manager' || u.rola === 'handlowiec')).sort(byName);
+  else ppl = [ME, ...teamOf(ME.id)];
+  if (p.przypisany && !ppl.some(u => u.id === p.przypisany)) ppl.push(USERS[p.przypisany] || { id: p.przypisany });
+  return o('', 'osoba, która zebrała') + ppl.map(u => o(u.id, u.id === ME.id ? 'Ja' : fullName(u) || 'inny użytkownik')).join('');
 }
 function openForm(k) {
   if (!cur) return; const p = cur, st = STAT[k];
@@ -516,29 +640,97 @@ function open(p) {
   $('note').value = p.notatka || '';
   $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmiana: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) +
     (p.zmienil ? ', ' + uname(p.zmienil) : '') : '';
+  if (cur !== open.lastHist) { open.lastHist = cur; $('hist').open = false; loadHist(p); }
   $('sheet').classList.add('open'); $('panel').classList.remove('open'); $('list').classList.remove('open');
 }
-function close() { $('sheet').classList.remove('open'); closeForm(); cur = null; }
+function close() { $('sheet').classList.remove('open'); closeForm(); cur = null; open.lastHist = null; }
+
+// ---------- Historia domu ----------
+const PV_LBL = { jest: 'Jest PV', nie: 'Nie ma PV' };
+function histLine(h) {
+  switch (h.rodzaj) {
+    case 'status': return h.status_po ? (STAT[h.status_po] ? STAT[h.status_po].label : h.status_po) + (h.opis ? ' (' + h.opis + ')' : '') : 'Status wyczyszczony';
+    case 'notatka': return 'Notatka: ' + (h.opis || '');
+    case 'pv': return PV_LBL[h.opis] || 'Wyczyszczono informację o PV';
+    case 'przekazanie': return h.przypisany ? 'Przekazano: ' + uname(h.przypisany) : 'Cofnięto przekazanie';
+    default: return h.opis || h.rodzaj;
+  }
+}
+async function loadHist(p) {
+  const box = $('hist'); box.hidden = false; $('histn').textContent = '';
+  try {
+    const { data, error } = await sb.from('historia').select('*').eq('pin_id', p.id).order('czas', { ascending: false }).limit(40);
+    if (error) throw error; if (cur !== p) return;
+    $('histn').textContent = data.length ? '(' + data.length + ')' : '';
+    $('histul').innerHTML = data.map(h => `<li><small>${esc(new Date(h.czas).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }))}${h.user_id ? ', ' + esc(uname(h.user_id)) : ''}</small>` +
+      `<div>${esc(histLine(h))}</div></li>`).join('') || '<li><div>Brak wpisów. Historia zapisuje się od teraz przy każdej zmianie.</div></li>';
+  } catch (e) { $('histul').innerHTML = '<li><div>Historia jest dostępna z internetem.</div></li>'; }
+}
 $('close').onclick = close;
+
+// ---------- Praca bez zasięgu: kolejka zmian w telefonie ----------
+// Zmiana zapisuje się od razu na ekranie; gdy nie ma internetu, czeka w telefonie i wysyła się sama.
+const isNet = e => !navigator.onLine || /fetch|network|load failed|timeout|offline|abort/i.test(String((e && (e.message || e)) || ''));
+const errText = e => { const m = (e && e.message) || ''; return /^Wpisz/.test(m) ? m + '.' : /uprawnie|row-level/i.test(m) ? 'Brak uprawnień do tej zmiany.' : 'Nie zapisano: ' + m; };
+let OQ = []; try { OQ = JSON.parse(localStorage.getItem('pv_queue') || '[]'); } catch (e) {}
+function oqSave() { try { localStorage.setItem('pv_queue', JSON.stringify(OQ)); } catch (e) {} renderStats(); }
+function pinRow(p) {
+  const row = { status: p.status, notatka: p.notatka, pv: p.pv || null, zmieniono: p.zmieniono, przypisany: p.przypisany ?? null };
+  for (const f of CLIENT) row[f] = p[f] ?? null;
+  if (isAdmin()) row.ukryta_admin = !!p.ukryta_admin;
+  return row;
+}
+function enqueue(op, p, row) {
+  const ex = OQ.find(x => x.id === p.id);
+  if (ex) Object.assign(ex.row, row); else OQ.push({ op, id: p.id, row: { ...row }, label: title(p) });
+  oqSave();
+}
+function applyQueue() {   // po wczytaniu z bazy pokaż zmiany, które jeszcze czekają w telefonie
+  for (const it of OQ) {
+    if (byId[it.id]) Object.assign(byId[it.id], it.row);
+    else if (it.op === 'insert') { const p = { ...it.row }; P.push(p); byId[p.id] = p; }
+  }
+}
+let syncing = false;
+async function syncQueue() {
+  if (syncing || !OQ.length) return; syncing = true; let sent = 0, failed = 0;
+  try {
+    while (OQ.length) {
+      const it = OQ[0]; let r;
+      try {
+        r = it.op === 'insert' ? await sb.from('pins').insert(it.row) : await sb.from('pins').update(it.row).eq('id', it.id).select('id');
+        if (!r.error && it.op === 'update' && (!r.data || !r.data.length)) r.error = new Error('brak uprawnień');
+      } catch (e) { r = { error: e }; }
+      if (r.error && isNet(r.error)) break;
+      OQ.shift(); oqSave();
+      if (r.error) { failed++; msg('Nie zapisano zmiany przy „' + it.label + '”. ' + errText(r.error), 7000); } else sent++;
+    }
+  } finally { syncing = false; }
+  if (sent && !OQ.length && !failed) msg('Wysłano zmiany zapisane bez internetu (' + sent + ').');
+  if (sent || failed) { reload(true); refreshCounts(); }
+}
+window.addEventListener('online', syncQueue);
+setInterval(syncQueue, 30000);
 
 let busy = false;
 async function save(p, patch) {
   if (busy) { msg('Chwila, zapisuję…'); return false; }
-  const FIELDS = ['status', 'notatka', 'pv', 'zmieniono', 'zmienil', 'ukryta_admin', ...CLIENT];
+  const FIELDS = ['status', 'notatka', 'pv', 'zmieniono', 'zmienil', 'ukryta_admin', 'przypisany', 'autor_statusu', ...CLIENT];
   busy = true; const prev = Object.fromEntries(FIELDS.map(f => [f, p[f]]));
+  if ('status' in patch && patch.status !== prev.status) p.autor_statusu = patch.status ? (ME && ME.id) : null;
   Object.assign(p, patch, { zmieniono: new Date().toISOString(), zmienil: ME ? ME.id : p.zmienil }); render(); if (cur === p) open(p);
+  const row = pinRow(p);
   try {
-    const row = { status: p.status, notatka: p.notatka, pv: p.pv || null, zmieniono: p.zmieniono };
-    for (const f of CLIENT) row[f] = p[f] ?? null;
-    if (isAdmin()) row.ukryta_admin = !!p.ukryta_admin;
+    if (OQ.length) { enqueue('update', p, row); msg('Zapisano w telefonie – wyślę, gdy wróci internet.', 3500); return true; }
     const { data, error } = await sb.from('pins').update(row).eq('id', p.id).select('id');
     if (error) throw error;
     if (!data || !data.length) throw new Error('brak uprawnień');
+    refreshCounts(); if (cur === p) loadHist(p);
     return true;
   } catch (e) {
+    if (isNet(e)) { enqueue('update', p, row); msg('Brak internetu – zmiana zapisana w telefonie, wyślę ją automatycznie.', 4000); return true; }
     Object.assign(p, prev); render(); if (cur === p) open(p);
-    const m = e.message || '';
-    msg(/^Wpisz/.test(m) ? m + '.' : /uprawnie|row-level/i.test(m) ? 'Brak uprawnień do tej zmiany.' : 'Nie zapisano – sprawdź internet i spróbuj ponownie.', 4000); return false;
+    msg(errText(e), 4500); return false;
   } finally { busy = false; }
 }
 async function setStatus(s0, clear) {
@@ -567,26 +759,68 @@ $('note').addEventListener('change', async () => {
 
 // ---------- Śledzenie: wysyłanie własnej pozycji (menedżer i handlowiec, gdy aplikacja jest otwarta) ----------
 const tracked = () => !!ME && (ME.rola === 'manager' || ME.rola === 'handlowiec');
-let lastSent = null, tq = [], gpsState = 'wait';
+let lastSent = null, tq = [], gpsState = 'wait', DAY = null, lastPos = null;
+try { tq = JSON.parse(localStorage.getItem('pv_tq') || '[]'); } catch (e) {}
+const tqSave = () => { try { localStorage.setItem('pv_tq', JSON.stringify(tq.slice(-500))); } catch (e) {} };
+// Dzień pracy: śledzenie działa tylko od „Zaczynam dzień” do „Kończę pracę”, najpóźniej do 21:00.
+const end21 = start => { const d = new Date(start); d.setHours(21, 0, 0, 0); return d; };
+const dayOver = d => !d || Date.now() >= end21(d.start).getTime();
+async function loadDay() {
+  if (!tracked()) return;
+  try {
+    const { data, error } = await sb.from('dni_pracy').select('*').eq('user_id', ME.id).is('koniec', null).order('start', { ascending: false }).limit(1);
+    if (error) throw error; DAY = data[0] || null;
+    if (DAY && dayOver(DAY)) await endDay(true);
+  } catch (e) {}
+  updDayUI();
+}
+async function startDay() {
+  if (new Date().getHours() >= 21) { msg('Po 21:00 śledzenie nie działa. Dzień zaczniesz jutro.', 4000); return; }
+  const { data, error } = await sb.from('dni_pracy').insert({}).select().single();
+  if (error) { msg(isNet(error) ? 'Do rozpoczęcia dnia potrzebny jest internet. Spróbuj za chwilę.' : 'Nie udało się rozpocząć dnia: ' + error.message, 4500); return; }
+  DAY = data; lastSent = null; updDayUI(); if (lastPos) trackPos(lastPos); msg('Dzień rozpoczęty – przełożony widzi Twoją trasę do „Kończę pracę” (najpóźniej 21:00).', 4500);
+  startGps(false);
+}
+async function endDay(auto) {
+  if (!DAY) return; const d = DAY;
+  await flushTrack();
+  const koniec = auto ? end21(d.start) : new Date();
+  const { error } = await sb.from('dni_pracy').update({ koniec: koniec.toISOString(), auto: !!auto }).eq('id', d.id);
+  if (error && !auto) { msg(isNet(error) ? 'Do zakończenia dnia potrzebny jest internet. Spróbuj za chwilę.' : 'Nie udało się zakończyć dnia: ' + error.message, 4500); return; }
+  DAY = null; updDayUI(); if (!auto) msg('Koniec pracy – śledzenie wyłączone.');
+}
+setInterval(() => { if (DAY && dayOver(DAY)) endDay(true); }, 60000);
+function updDayUI() {
+  const b = $('daybtn'); b.hidden = !tracked();
+  if (tracked()) {
+    b.className = 'daybtn' + (DAY ? ' on' : '');
+    b.innerHTML = DAY ? `<b>Kończę pracę</b><small>W pracy od ${new Date(DAY.start).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' })}, śledzenie włączone</small>`
+                      : `<b>Zaczynam dzień</b><small>Włącza udostępnianie lokalizacji przełożonemu (do 21:00)</small>`;
+  }
+  updTrackInfo(); renderStats();
+}
+$('daybtn').onclick = () => DAY ? endDay(false) : startDay();
 function trackPos(pos) {
-  if (!tracked()) return; const c = pos.coords; if (c.accuracy > 150) return;
+  if (!tracked() || !DAY || dayOver(DAY)) return; const c = pos.coords; if (c.accuracy > 150) return;
   const pt = { lat: +c.latitude.toFixed(6), lon: +c.longitude.toFixed(6), dokladnosc: Math.round(c.accuracy), czas: new Date(pos.timestamp || Date.now()).toISOString() };
   const dt = lastSent ? Date.now() - lastSent.t : Infinity, dd = lastSent ? dist(lastSent, pt) : Infinity;
   if (!(dt > 300000 || (dt > 45000 && dd > 40))) return;   // co 5 min albo po przejechaniu 40 m (nie częściej niż co 45 s)
-  lastSent = { ...pt, t: Date.now() }; tq.push(pt); flushTrack();
+  lastSent = { ...pt, t: Date.now() }; tq.push(pt); tqSave(); flushTrack();
 }
 async function flushTrack() {
   if (flushTrack.busy || !tq.length) return; flushTrack.busy = true;
   const batch = tq.splice(0, 100);
   try { const { error } = await sb.from('pozycje').insert(batch); if (error) throw error; }
-  catch (e) { tq = batch.concat(tq).slice(-500); }   // brak internetu: spróbujemy później
+  catch (e) { if (isNet(e)) tq = batch.concat(tq).slice(-500); }   // brak internetu: spróbujemy później (pozycje spoza dnia pracy baza odrzuca)
+  tqSave();
   flushTrack.busy = false; updTrackInfo();
 }
 setInterval(flushTrack, 60000);
 function updTrackInfo() {
   const el = $('trackinfo'); el.hidden = !tracked(); if (!tracked()) return;
-  el.className = 'trk ' + (gpsState === 'ok' ? 'on' : gpsState === 'off' ? 'off' : '');
-  el.textContent = gpsState === 'off' ? 'Lokalizacja wyłączona – przełożony nie widzi Twojej trasy. Włącz ją w ustawieniach przeglądarki.'
+  el.className = 'trk ' + (!DAY ? '' : gpsState === 'ok' ? 'on' : gpsState === 'off' ? 'off' : '');
+  el.textContent = !DAY ? 'Śledzenie wyłączone – włącza się po „Zaczynam dzień”.'
+    : gpsState === 'off' ? 'Lokalizacja wyłączona – przełożony nie widzi Twojej trasy. Włącz ją w ustawieniach przeglądarki.'
     : gpsState === 'ok' ? 'Udostępniasz lokalizację przełożonemu, gdy aplikacja jest otwarta' + (tq.length ? ' (czeka na wysłanie: ' + tq.length + ')' : '')
     : 'Czekam na sygnał GPS…';
 }
@@ -596,7 +830,7 @@ function startGps(center) {
   if (!navigator.geolocation) { msg('Ten telefon nie udostępnia lokalizacji.'); return; }
   if (startGps.w == null) startGps.w = navigator.geolocation.watchPosition(pos => {
     const first = !me; me = { lat: pos.coords.latitude, lon: pos.coords.longitude };
-    if (gpsState !== 'ok') { gpsState = 'ok'; updTrackInfo(); } trackPos(pos);
+    lastPos = pos; if (gpsState !== 'ok') { gpsState = 'ok'; updTrackInfo(); } trackPos(pos);
     if (!meMarker) meMarker = L.marker([me.lat, me.lon], { icon: L.divIcon({ className: '', html: '<div class="medot"></div>', iconSize: [18, 18] }), interactive: false, zIndexOffset: 1000 }).addTo(map);
     else meMarker.setLatLng([me.lat, me.lon]);
     if (first && startGps.center) { map.setView([me.lat, me.lon], Math.max(map.getZoom(), 11)); startGps.center = false; }
@@ -643,14 +877,27 @@ function trackPeople() {   // kogo wolno śledzić: menedżer – swoich handlow
 async function openTrack() {
   closeSheets(); if (!$('trackday').value) $('trackday').value = todayStr();
   $('trackbody').innerHTML = '<div class="empty">Wczytuję pozycje…</div>'; $('track').classList.add('open');
-  try { await loadTeam(); await loadLast(); } catch (e) { msg('Nie udało się pobrać pozycji: ' + (e.message || e), 5000); }
+  try { await loadTeam(); await loadLast(); await loadDays(); } catch (e) { msg('Nie udało się pobrać pozycji: ' + (e.message || e), 5000); }
   fillTrack();
+}
+let DAYS = {};
+async function loadDays() {
+  const t0 = new Date(); t0.setHours(0, 0, 0, 0);
+  const { data, error } = await sb.from('dni_pracy').select('*').gte('start', t0.toISOString()).order('start'); if (error) throw error;
+  DAYS = {}; for (const d of data) DAYS[d.user_id] = d;   // ostatni dzień danej osoby z dziś
+}
+function dayText(u) {
+  const d = DAYS[u.id], hm = t => new Date(t).toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' });
+  if (!d) return 'Dziś nie rozpoczął(a) pracy';
+  if (!d.koniec && !dayOver(d)) return 'W pracy od ' + hm(d.start);
+  return 'Pracował(a) ' + hm(d.start) + '–' + hm(d.koniec || end21(d.start)) + (d.auto ? ' (koniec automatyczny)' : '');
 }
 function fillTrack() {
   const row = (u, sub) => {
-    const l = LAST[u.id], live = l && Date.now() - new Date(l.czas) < 15 * 60000;
+    const l = LAST[u.id], d = DAYS[u.id], working = d && !d.koniec && !dayOver(d);
     return `<div class="person${sub ? ' sub' : ''}"><div class="av" style="background:${pcolor(u.id)}">${esc(initial(u))}</div>` +
-      `<div class="pi"><b>${esc(fullName(u))}</b><small class="${live ? 'live' : ''}">${l ? (live ? 'Aktywny: ' : 'Ostatnio: ') + ago(l.czas) : 'Brak pozycji z ostatnich 7 dni'}</small></div>` +
+      `<div class="pi"><b>${esc(fullName(u))}</b><small class="${working ? 'live' : ''}">${esc(dayText(u))}</small>` +
+      `<small>${l ? 'Ostatnia pozycja: ' + ago(l.czas) : 'Brak pozycji z ostatnich 7 dni'}</small></div>` +
       (l ? `<button data-a="where" data-u="${u.id}">Gdzie</button>` : '') + `<button class="pri" data-a="route" data-u="${u.id}">Trasa</button></div>`;
   };
   let h = '';
@@ -701,7 +948,8 @@ function whoSet() {
   if (!WHO) return null; const [t, id] = WHO.split(':');
   return new Set(t === 'u' ? [id] : [id, ...teamOf(id).map(u => u.id)]);
 }
-const byWho = p => { const s = whoSet(); return !s || s.has(autor(p)); };
+const byWho = p => { const s = whoSet(); return !s || s.has(autor(p)) || (!!p.przypisany && s.has(p.przypisany)); };
+const owner = p => p.przypisany || autor(p);   // kto prowadzi klienta
 function whoSelect() {
   if (!ME || (ME.rola !== 'admin' && ME.rola !== 'manager')) return '';
   const opt = (v, l) => `<option value="${v}" ${WHO === v ? 'selected' : ''}>${esc(l)}</option>`;
@@ -735,15 +983,36 @@ function openDeals(k) {
   if (k === 'zespol' && !(ME && (ME.rola === 'admin' || ME.rola === 'manager'))) k = 'lead';
   dealTab = k; $('dealsq').value = ''; closeSheets(); fillDeals(); $('deals').classList.add('open');
 }
+// Wyniki: ile różnych domów dana osoba oznaczyła w okresie (z historii), plus skuteczność lejka.
+let SCOREP = 'miesiac', SCORE = {};
+const PERIODS = { tydzien: 'Ten tydzień', miesiac: 'Ten miesiąc', poprzedni: 'Poprzedni mies.', wszystko: 'Wszystko' };
+function periodRange(k) {
+  const now = new Date(), d = new Date(now); d.setHours(0, 0, 0, 0);
+  if (k === 'tydzien') { d.setDate(d.getDate() - ((d.getDay() + 6) % 7)); return [d, new Date(+now + 864e5)]; }
+  if (k === 'miesiac') { d.setDate(1); return [d, new Date(+now + 864e5)]; }
+  if (k === 'poprzedni') { const a = new Date(d.getFullYear(), d.getMonth() - 1, 1), b = new Date(d.getFullYear(), d.getMonth(), 1); return [a, b]; }
+  return [new Date('2000-01-01'), new Date(+now + 864e5)];
+}
+const pct = (a, b) => b ? Math.round(100 * a / b) + '%' : '–';
 function scoreRow(id, label, cls) {
-  const n = k => P.filter(p => p.status === k && (id instanceof Set ? id.has(autor(p)) : autor(p) === id)).length;
-  const who = id instanceof Set ? cls.who : 'u:' + id;
-  return `<div class="srow ${cls.row || ''}"><button class="nm ${cls.sub ? 'sub' : ''}" data-who="${who}" data-k="lead">${esc(label)}</button>` +
+  const ids = id instanceof Set ? [...id] : [id];
+  const n = k => ids.reduce((s, u) => s + ((SCORE[u] || {})[k] || 0), 0);
+  const who = id instanceof Set ? cls.who : 'u:' + id, L = n('lead'), S = n('spotkanie'), U = n('umowa');
+  const conv = L || S ? `<small class="conv">lead→spotk. ${pct(S, L)}, spotk.→umowa ${pct(U, S)}</small>` : '';
+  return `<div class="srow ${cls.row || ''}"><button class="nm ${cls.sub ? 'sub' : ''}" data-who="${who}" data-k="lead">${esc(label)}${conv}</button>` +
     DEALS.map(k => { const v = n(k); return `<button class="pill ${v ? '' : 'z'}" style="--c:${STAT[k].color}" data-who="${who}" data-k="${k}" aria-label="${STAT[k].label}: ${v}">${v}</button>`; }).join('') + '</div>';
 }
 const scoreHead = '<div class="srow head"><span>Osoba</span><span>Leady</span><span>Spotk.</span><span>Umowy</span></div>';
-function fillScore() {
-  let h = '';
+async function fillScore() {
+  const per = `<div class="seg per" id="scoreper">${Object.entries(PERIODS).map(([k, v]) => `<button data-per="${k}" class="${k === SCOREP ? 'on' : ''}">${v}</button>`).join('')}</div>`;
+  const [od, doo] = periodRange(SCOREP);
+  try {
+    const { data, error } = await sb.rpc('pv_wyniki', { p_od: od.toISOString(), p_do: doo.toISOString() });
+    if (error) throw error; SCORE = {};
+    for (const r of data) (SCORE[r.user_id] = SCORE[r.user_id] || {})[r.status] = Number(r.n);
+  } catch (e) { $('dealsul').innerHTML = `<li style="list-style:none">${per}<div class="empty">Wyniki są dostępne z internetem.</div></li>`; return; }
+  if (dealTab !== 'zespol') return;
+  let h = per;
   const card = (m, title, sub) => {
     const team = teamOf(m.id), ids = new Set([m.id, ...team.map(u => u.id)]);
     return `<div class="score"><div class="sh">${esc(title)}<small>${sub}</small></div>${scoreHead}` +
@@ -758,7 +1027,7 @@ function fillScore() {
     if (loose.length) h += `<div class="score"><div class="sh">Bez menedżera</div>${scoreHead}${loose.map(u => scoreRow(u.id, fullName(u), {})).join('')}</div>`;
     h += `<div class="score"><div class="sh">Administratorzy</div>${scoreHead}${all.filter(u => u.rola === 'admin').sort(byName).map(u => scoreRow(u.id, fullName(u), {})).join('')}</div>`;
   } else h += card(ME, 'Twój zespół', teamOf(ME.id).length + ' handl.');
-  $('dealssub').textContent = 'Kto ile zebrał. Stuknij liczbę, by zobaczyć szczegóły.';
+  $('dealssub').textContent = 'Ile domów każdy oznaczył w okresie. Stuknij liczbę, by zobaczyć obecną listę tej osoby.';
   $('dealsul').innerHTML = `<li style="list-style:none">${h}</li>`;
 }
 function fillDeals() {
@@ -783,7 +1052,7 @@ function fillDeals() {
       `<div class="d1"><span class="dot" style="background:${c}"></span><b>${esc(clientName(p) || 'Brak danych klienta')}</b><small>${esc(new Date(p.zmieniono).toLocaleDateString('pl-PL'))}</small></div>` +
       `<div class="d2">${esc(title(p))}${p.gmina ? ', gm. ' + esc(p.gmina) : ''}</div>` +
       (info.length ? `<div class="d3">${info.map(esc).join('<br>')}</div>` : '') +
-      `<div class="d4"><small>${autor(p) ? 'Wpisał(a): ' + esc(uname(autor(p))) : ''}</small>` +
+      `<div class="d4"><small>${autor(p) ? 'Zebrał(a): ' + esc(uname(autor(p))) : ''}${p.przypisany && p.przypisany !== autor(p) ? '<br>Prowadzi: ' + esc(uname(p.przypisany)) : ''}</small>` +
       (p.klient_telefon ? `<a class="go call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : '') +
       `<a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></div></li>`;
   }).join('') || `<li class="empty">${q ? 'Nic nie pasuje do wyszukiwania.' : 'Nie ma jeszcze domów ze statusem „' + STAT[dealTab].label + '”. Pojawią się tu same, gdy ktoś nada ten status.'}</li>`;
@@ -791,11 +1060,29 @@ function fillDeals() {
 document.querySelectorAll('[data-deals]').forEach(b => b.onclick = () => openDeals(b.dataset.deals));
 $('dealtabs').addEventListener('click', e => { const b = e.target.closest('[data-k]'); if (b) { dealTab = b.dataset.k; fillDeals(); } });
 $('dealsul').addEventListener('click', e => {
+  const pb = e.target.closest('[data-per]'); if (pb) { e.stopPropagation(); SCOREP = pb.dataset.per; fillScore(); return; }
   const b = e.target.closest('button[data-who]'); if (!b) return; e.stopPropagation();
   WHO = b.dataset.who; dealTab = b.dataset.k; fillDeals(); $('dealsul').scrollTop = 0;
 }, true);
 $('dealsq').addEventListener('input', fillDeals);
 $('dealsclose').onclick = () => $('deals').classList.remove('open');
+$('dealscsv').onclick = () => {
+  if (!isAdmin()) return;
+  const rows = P.filter(p => DEALS.includes(p.status) && byWho(p)).sort((a, b) => String(b.zmieniono).localeCompare(String(a.zmieniono)));
+  if (!rows.length) { msg('Nie ma czego eksportować przy obecnym filtrze.'); return; }
+  const dt = t => { if (!t) return ''; const d = new Date(t); const z = n => String(n).padStart(2, '0'); return `${d.getFullYear()}-${z(d.getMonth() + 1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}`; };
+  const mgr = id => { const u = USERS[id]; return u && u.rola === 'handlowiec' && u.manager_id ? fullName(USERS[u.manager_id]) : u && u.rola === 'manager' ? fullName(u) : ''; };
+  const head = ['Status', 'Ostatnia zmiana', 'Imię', 'Nazwisko', 'Telefon', 'Produkt', 'Termin spotkania', 'Notatka', 'Adres', 'Miejscowość', 'Gmina', 'Powiat',
+    'Zebrał(a)', 'Prowadzi', 'Menedżer', 'Szerokość', 'Długość', 'Mapa'];
+  const data = rows.map(p => [STAT[p.status].label, dt(p.zmieniono), p.klient_imie, p.klient_nazwisko, p.klient_telefon, p.produkt, dt(p.termin), p.notatka,
+    p.adres, p.miejscowosc, p.gmina, p.obszar, uname(autor(p)), p.przypisany ? uname(p.przypisany) : uname(autor(p)), mgr(owner(p)), p.lat, p.lon,
+    `https://www.google.com/maps/search/?api=1&query=${p.lat},${p.lon}`]);
+  const cell = v => { const t = String(v ?? '').replace(/\r?\n/g, ' '); return /[";]/.test(t) ? '"' + t.replace(/"/g, '""') + '"' : t; };
+  const csv = '\ufeff' + [head, ...data].map(r => r.map(cell).join(';')).join('\r\n');
+  const a = document.createElement('a'); a.href = URL.createObjectURL(new Blob([csv], { type: 'text/csv;charset=utf-8' }));
+  a.download = 'sprzedaz_' + new Date().toISOString().slice(0, 10) + '.csv'; document.body.appendChild(a); a.click(); a.remove();
+  msg('Pobrano ' + rows.length + ' wierszy. Plik otworzysz w Excelu.', 4000);
+};
 
 // ---------- Grafik spotkań ----------
 let grafPast = false;
@@ -808,7 +1095,7 @@ function dayLabel(d) {
 function openGrafik() { closeSheets(); fillGrafik(); $('grafik').classList.add('open'); }
 function fillGrafik() {
   const t0 = new Date(); t0.setHours(0, 0, 0, 0);
-  const all = P.filter(p => p.status === 'spotkanie' && byWho(p));
+  const all = P.filter(p => p.status === 'spotkanie' && byWho(p) && (!ME || ME.rola !== 'handlowiec' || owner(p) === ME.id));
   const noDate = all.filter(p => !p.termin);
   const list = all.filter(p => p.termin && (grafPast ? new Date(p.termin) < t0 : new Date(p.termin) >= t0))
     .sort((a, b) => (grafPast ? -1 : 1) * (new Date(a.termin) - new Date(b.termin)));
@@ -821,7 +1108,7 @@ function fillGrafik() {
     return `<li class="slot${grafPast ? ' past' : ''}" data-id="${esc(p.id)}"><div class="tm"><b>${d ? d.toLocaleTimeString('pl-PL', { hour: '2-digit', minute: '2-digit' }) : '–'}</b>` +
       `<small>${d ? d.toLocaleDateString('pl-PL', { day: 'numeric', month: 'short' }) : 'bez terminu'}</small></div><div class="bd"><b>${esc(clientName(p) || 'Klient')}</b>` +
       `<div>${esc(title(p))}${p.gmina ? ', gm. ' + esc(p.gmina) : ''}</div>` + (p.notatka ? `<div>${esc(p.notatka)}</div>` : '') +
-      `<div class="d4"><small>${lead && autor(p) ? esc(uname(autor(p))) : ''}</small>` +
+      `<div class="d4"><small>${lead && owner(p) ? 'Prowadzi: ' + esc(uname(owner(p))) : ''}</small>` +
       (p.klient_telefon ? `<a class="go call" href="tel:${esc(digits(p.klient_telefon))}">${ic('phone')}Zadzwoń</a>` : '') +
       `<a class="go" href="${navUrl(p)}" target="_blank" rel="noopener">${ic('nav')}Jedź</a></div></div></li>`;
   };
@@ -879,16 +1166,15 @@ $('file').onchange = async e => {
     const raw = file.name.toLowerCase().endsWith('.csv') ? parseCSV(text) : JSON.parse(text);
     const rows = raw.map(normalize).filter(Boolean);
     if (!rows.length) { msg('W pliku nie ma pinezek.'); return; }
-    const before = P.length; msg('Importuję ' + rows.length + ' pinezek…', 0);
+    let added = 0; msg('Importuję ' + rows.length + ' pinezek…', 0);
     for (let i = 0; i < rows.length; i += 500) {
-      const { error } = await sb.from('pins').upsert(rows.slice(i, i + 500), { onConflict: 'id', ignoreDuplicates: true });
-      if (error) throw error;
+      const { data, error } = await sb.from('pins').upsert(rows.slice(i, i + 500), { onConflict: 'id', ignoreDuplicates: true }).select('id');
+      if (error) throw error; added += (data || []).length;
     }
-    await loadAll();
-    msg('Gotowe: dodano ' + (P.length - before) + ' nowych pinezek (pominięto już istniejące).', 5000);
     $('panel').classList.remove('open');
-    const added = rows.filter(r => byId[r.id]);
-    if (added.length) map.fitBounds(L.latLngBounds(added.map(r => [r.lat, r.lon])), { padding: [30, 30] });
+    map.fitBounds(L.latLngBounds(rows.map(r => [r.lat, r.lon])), { padding: [30, 30] });
+    await loadAll();
+    msg('Gotowe: dodano ' + added + ' nowych pinezek (pominięto już istniejące).', 5000);
   } catch (err) { msg('Import nieudany: ' + (err.message || err), 6000); }
 };
 
@@ -900,16 +1186,16 @@ $('updfile').onchange = async e => {
     const rows = JSON.parse(await file.text()).map(normalize).filter(Boolean);
     const areas = [...new Set(rows.map(r => r.obszar).filter(Boolean))];
     if (!rows.length || !areas.length) { msg('Plik nie wygląda na plik powiatu.'); return; }
-    await loadAll();
+    const ALL = await fetchAllPins(), byAll = Object.fromEntries(ALL.map(p => [p.id, p]));   // pełne dane, nie tylko widoczny obszar
     const touched = p => !!(p.status || p.pv || p.notatka || p.zrodlo === 'reczne' || p.ukryta_admin);
-    const inArea = P.filter(p => areas.includes(p.obszar));
+    const inArea = ALL.filter(p => areas.includes(p.obszar));
     const newIds = new Set(rows.map(r => r.id));
     const toDelete = inArea.filter(p => !touched(p) && !newIds.has(p.id)).map(p => p.id);
     // nie dodawaj nic obok miejsc już obsłużonych ani obok istniejących pinezek
-    const keep = P.filter(p => !toDelete.includes(p.id));
+    const keep = ALL.filter(p => !toDelete.includes(p.id));
     const near = (r, list, m) => list.some(p => dist(p, r) < m);
     const handled = keep.filter(touched);
-    const toAdd = rows.filter(r => !byId[r.id] && !near(r, handled, 30) && !near(r, keep, 15));
+    const toAdd = rows.filter(r => !byAll[r.id] && !near(r, handled, 30) && !near(r, keep, 15));
     msg(`Aktualizuję ${areas.join(', ')}: usuwam ${toDelete.length} nieruszonych, dodaję ${toAdd.length} nowych…`, 0);
     for (let i = 0; i < toDelete.length; i += 200) {
       const { error } = await sb.from('pins').delete().in('id', toDelete.slice(i, i + 200)); if (error) throw error;
@@ -923,10 +1209,12 @@ $('updfile').onchange = async e => {
 };
 
 // ---------- Eksport ocen (format bez zmian – korzysta z niego model) ----------
-$('exportbtn').onclick = () => {
+$('exportbtn').onclick = async () => {
   if (!isAdmin()) return;
+  msg('Przygotowuję eksport…', 0);
+  let ALL; try { ALL = await fetchAllPins(); } catch (e) { msg('Eksport wymaga internetu: ' + (e.message || e), 5000); return; }
   // ukryte przez administratora eksportujemy jak dawniej, ze statusem 'usun' (gdy nie mają innego statusu)
-  const rows = P.filter(p => p.pv || p.status || p.zrodlo === 'reczne' || p.ukryta_admin).map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
+  const rows = ALL.filter(p => p.pv || p.status || p.zrodlo === 'reczne' || p.ukryta_admin).map(p => ({ id: p.id, lat: p.lat, lon: p.lon, zrodlo: p.zrodlo, pewnosc: p.pewnosc,
     wynik: p.wynik, obszar: p.obszar, status: p.status || (p.ukryta_admin ? 'usun' : null), pv: p.pv || (p.status === 'umowa' ? 'jest' : null), zmieniono: p.zmieniono }));
   const blob = new Blob([JSON.stringify(rows)], { type: 'application/json' });
   const a = document.createElement('a'); a.href = URL.createObjectURL(blob);
@@ -955,7 +1243,10 @@ async function start(fresh) {
     const mine = TER.filter(t => t.user_id === ME.id);
     if (!mine.length) msg('Nie masz jeszcze przydzielonego terenu. Poproś ' + (ME.rola === 'manager' ? 'administratora' : 'menedżera') + ' o przydział.', 6000);
     else if (fresh || !localStorage.getItem('pv_view')) fitTer(mine);
-  } else if (!localStorage.getItem('pv_view') && P.length) map.fitBounds(L.latLngBounds(P.map(p => [p.lat, p.lon])), { padding: [30, 30] });
+  } else if (!localStorage.getItem('pv_view') && P.length) {
+    map.fitBounds(L.latLngBounds(P.map(p => [p.lat, p.lon])), { padding: [30, 30], animate: false });
+    if (viewMode() && map.getZoom() < MINZ) map.setZoom(MINZ, { animate: false });
+  }
   startGps(false);
 }
 document.addEventListener('visibilitychange', async () => {

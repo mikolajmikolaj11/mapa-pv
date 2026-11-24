@@ -21,6 +21,7 @@ pewnosc text ('pewne' | 'prawdopodobne'); wynik real; obszar text (np. 'pow. kon
 zmieniono timestamptz; ukryta_admin boolean (pinezka „usunięta” przez administratora – ukryta tylko u niego);
 klient_imie, klient_nazwisko, klient_telefon, produkt text; termin timestamptz (dane klienta przy lead/spotkanie/umowa);
 autor_statusu uuid (kto nadał obecny status – ustawia trigger, nie da się podrobić);
+przypisany uuid (kto prowadzi klienta po przekazaniu; widzi dom także poza swoim terenem);
 zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pins_straznik`).
 
 ## Role i tereny (od 2026-11-24, skrypty w `sql/`)
@@ -54,6 +55,28 @@ zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pi
 - Menu → Wyniki zespołu (admin, menedżer): tabela osób z liczbą leadów / spotkań / umów wg autor_statusu;
   stuknięcie liczby otwiera listę tej osoby. Filtr „Osoba” w Sprzedaży i Grafiku (osoba albo cały zespół menedżera).
 - Menu: sekcja „Pokaż na mapie” jest zwijana (stan zapamiętany).
+- Skrypt 06_historia_praca_konta (24.11.2026):
+  * `historia` (pin_id, czas, user_id, rodzaj: dodano|status|notatka|pv|dane|przekazanie, status_przed/po, opis, przypisany) –
+    zapisuje trigger pv_historia_zapis; widzi ją każdy, kto widzi dom. Karta domu → „Historia domu”.
+  * Wyniki zespołu liczone z historii: pv_wyniki(p_od, p_do) = ile różnych domów osoba oznaczyła jako lead/spotkanie/umowa
+    w okresie (Ten tydzień / Ten miesiąc / Poprzedni mies. / Wszystko) + skuteczność lead→spotkanie, spotkanie→umowa.
+  * Przekazanie (pins.przypisany): admin – każdemu; menedżer – sobie lub swoim handlowcom; handlowiec nie może.
+    Wynik zostaje u zbierającego (autor_statusu). Grafik handlowca pokazuje spotkania, które prowadzi (przypisany albo autor).
+  * `dni_pracy` (user_id, start, koniec, auto): „Zaczynam dzień / Kończę pracę”; automatyczny koniec o 21:00 (pv_koniec_dnia).
+    Pozycje GPS przyjmowane tylko w oknie dnia pracy (RLS pozycje_insert); widoczne i przechowywane 7 dni
+    (trigger pv_pozycje_sprzatanie kasuje starsze).
+  * profiles.zablokowany – zablokowane konto nic nie widzi (pv_rola zwraca null).
+  * pv_liczniki() – liczniki kategorii dla administratora.
+- Praca bez zasięgu: zmiany pinezek (status, notatka, PV, dane klienta, przekazanie, dodanie domu) zapisują się w telefonie
+  (localStorage pv_queue) i wysyłają same po powrocie internetu; pozycje GPS w pv_tq. Ostatni zapis wygrywa.
+- Administrator wczytuje tylko widoczny obszar mapy (od przybliżenia MINZ = 4) + wszystkie leady/spotkania/umowy;
+  liczniki z pv_liczniki(); eksport do modelu i „Aktualizuj powiat” pobierają pełne dane. Zespół wczytuje cały swój teren.
+- Eksport sprzedaży (admin): Sprzedaż → „Pobierz do Excela” – plik CSV (średniki, UTF-8) z leadami/spotkaniami/umowami
+  wg filtra osoby: dane klienta, adres, zebrał(a), prowadzi, menedżer, link do mapy. Niezależny od eksportu dla modelu.
+- Konta z aplikacji (admin, panel Zespół): Dodaj konto, Nowe hasło, Zablokuj/Odblokuj – przez Edge Function `pv-konta`
+  (kod: supabase/functions/pv-konta/index.ts). Wdrożenie: Supabase → Edge Functions → Deploy a new function → Via Editor,
+  nazwa pv-konta, wklej kod, Deploy; w ustawieniach funkcji wyłącz „Verify JWT” (funkcja sama sprawdza, czy woła administrator).
+  Funkcja używa klucza z SUPABASE_SECRET_KEYS (albo SUPABASE_SERVICE_ROLE_KEY) – klucz nigdy nie trafia do aplikacji.
 - Menu → Leady zebrane / Spotkania umówione / Umowy: listy domów wg aktualnego statusu (dane klienta, adres,
   Zadzwoń, Jedź, wyszukiwarka); spotkania sortowane po terminie.
 - Wygląd: własne ikony SVG (sprite w index.html), panele „szkło” nad mapą, dok akcji po prawej, kafelki statusów.
