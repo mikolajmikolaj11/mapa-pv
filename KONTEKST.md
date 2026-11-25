@@ -83,7 +83,8 @@ zmienil uuid (kto ostatnio zmienił / dodał ręcznie – ustawia trigger `pv_pi
 
 ## Ważne zasady danych
 - `pv`, statusy, notatki i pinezki ręczne to praca handlowca – nie mogą być nadpisywane przez importy/aktualizacje.
-- „Usuń” (tylko administrator) ustawia ukryta_admin = true: pinezka znika tylko u administratora, zespół dalej ją widzi.
+- „Usuń” (tylko administrator): jeśli dom nie ma oceny PV, aplikacja najpierw pyta „Czy jest tu fotowoltaika?
+  Jest PV / Nie ma PV / Nie wiem” i zapisuje odpowiedź w pv (od 25.11.2026). Następnie ustawia ukryta_admin = true: pinezka znika tylko u administratora, zespół dalej ją widzi.
   Rekord zostaje. Dawne statusy 'usun' przeniesiono na ten znacznik (skrypt 04). Aktualizacja powiatu traktuje
   ukryte pinezki jako obsłużone. Eksport wypisuje je jak dawniej ze statusem 'usun' (gdy nie mają innego statusu).
 - Wymagane dane klienta (pilnuje trigger pv_pins_straznik i formularz w aplikacji):

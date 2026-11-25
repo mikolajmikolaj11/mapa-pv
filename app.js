@@ -640,7 +640,7 @@ function open(p) {
   $('note').value = p.notatka || '';
   $('saved').textContent = p.status || p.notatka || p.pv ? 'Zmiana: ' + new Date(p.zmieniono).toLocaleString('pl-PL', { dateStyle: 'short', timeStyle: 'short' }) +
     (p.zmienil ? ', ' + uname(p.zmienil) : '') : '';
-  if (cur !== open.lastHist) { open.lastHist = cur; $('hist').open = false; loadHist(p); }
+  if (cur !== open.lastHist) { open.lastHist = cur; $('hist').open = false; $('delask').hidden = true; loadHist(p); }
   $('sheet').classList.add('open'); $('panel').classList.remove('open'); $('list').classList.remove('open');
 }
 function close() { $('sheet').classList.remove('open'); closeForm(); cur = null; open.lastHist = null; }
@@ -742,12 +742,25 @@ async function setStatus(s0, clear) {
   msg(s ? 'Zapisano: ' + STAT[s].label : 'Status wyczyszczony');
 }
 $('tiles').addEventListener('click', e => { const b = e.target.closest('.st'); if (b) setStatus(b.dataset.s); });
+// Usuwanie (tylko u administratora): gdy dom nie ma jeszcze oceny PV, najpierw pytamy o nią –
+// dzięki temu każda usunięta pinezka zostaje w eksporcie z informacją „jest / nie ma PV” dla modelu.
+async function hidePin(pv) {
+  const p = cur; if (!p) return; $('delask').hidden = true;
+  const patch = { ukryta_admin: true }; if (pv) patch.pv = pv;
+  if (!(await save(p, patch))) return;
+  close(); msg('Pinezka zniknęła tylko u Ciebie – zespół nadal ją widzi. Przywrócisz ją w Menu → Usunięte.', 4500);
+}
 $('delbtn').onclick = async () => {
-  if (!isAdmin() || !cur) return; const p = cur, hide = !p.ukryta_admin;
-  if (!(await save(p, { ukryta_admin: hide }))) return;
-  if (hide) { close(); msg('Pinezka zniknęła tylko u Ciebie – zespół nadal ją widzi. Przywrócisz ją w Menu → Usunięte.', 4500); }
-  else msg('Pinezka przywrócona');
+  if (!isAdmin() || !cur) return; const p = cur;
+  if (p.ukryta_admin) { if (await save(p, { ukryta_admin: false })) msg('Pinezka przywrócona'); return; }
+  if (p.pv) { hidePin(null); return; }
+  $('delask').hidden = false; $('delask').scrollIntoView({ block: 'nearest' });
 };
+$('delask').addEventListener('click', e => {
+  const b = e.target.closest('[data-pv]'); if (!b) return;
+  if (b.dataset.pv === 'anuluj') { $('delask').hidden = true; return; }
+  hidePin(b.dataset.pv === 'nie_wiem' ? null : b.dataset.pv);
+});
 document.querySelectorAll('.pvb').forEach(b => b.onclick = async () => {
   if (!cur) return; const p = cur; const v = p.pv === b.dataset.v ? null : b.dataset.v;
   if (await save(p, { pv: v })) msg(v === 'jest' ? 'Zapisano: jest PV' : v === 'nie' ? 'Zapisano: nie ma PV' : 'Wyczyszczono informację o PV');

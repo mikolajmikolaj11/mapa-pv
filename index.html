@@ -269,6 +269,14 @@
   .hist ul{list-style:none;margin:0;padding:0 0 8px}
   .hist li{padding:7px 0;border-top:1px solid var(--line);font-size:13px}
   .hist li small{color:var(--mut);font-size:11px}
+  /* pytanie o PV przy usuwaniu */
+  .delask{background:#fef2f2;border-radius:16px;padding:12px;margin-top:8px}
+  .delask b{display:block;font-size:15px}
+  .delask small{display:block;color:var(--mut);font-size:12px;margin:2px 0 10px}
+  .delask .r{display:grid;grid-template-columns:repeat(3,1fr);gap:6px}
+  .delask .r button{border:0;border-radius:12px;padding:11px 4px;font-weight:700;font-size:13px;background:#fff}
+  .delask .r button[data-pv=jest]{color:#16a34a}
+  .delask .r button[data-pv=nie]{color:#dc2626}
   /* przekazanie */
   .kown{display:flex;flex-wrap:wrap;gap:6px 14px;align-items:center;margin-top:10px;font-size:13px;color:var(--mut)}
   .kown b{color:var(--ink)}
@@ -458,6 +466,12 @@
   </div>
   <details class="hist" id="hist" hidden><summary>Historia domu <small id="histn"></small></summary><ul id="histul"></ul></details>
   <div class="foot only-admin"><button class="lnk red" id="delbtn"><svg class="ic"><use href="#i-trash"/></svg><span>Usuń pinezkę</span></button></div>
+  <div class="delask only-admin" id="delask" hidden>
+    <b>Czy jest tu fotowoltaika?</b>
+    <small>Odpowiedź trafi do eksportu i pomoże douczyć model.</small>
+    <div class="r"><button data-pv="jest">Jest PV</button><button data-pv="nie">Nie ma PV</button><button data-pv="nie_wiem">Nie wiem</button></div>
+    <button class="lnk" data-pv="anuluj">Anuluj</button>
+  </div>
   </div>
   <form id="formview" novalidate></form>
 </div>
@@ -524,7 +538,7 @@
 <script src="lib/proj4.js"></script>
 <script src="lib/proj4leaflet.js"></script>
 <script src="lib/supabase.js"></script>
-<script src="config.js?v=2026112407"></script>
-<script src="app.js?v=2026112407"></script>
+<script src="config.js?v=2026112501"></script>
+<script src="app.js?v=2026112501"></script>
 </body>
 </html>
